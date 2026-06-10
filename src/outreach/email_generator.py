@@ -129,11 +129,15 @@ class OutreachSequence:
         sent_count = 0
         for seq_id, lead_id, step, email, name, company in pending:
             lead = await self.db.get_lead_by_id(lead_id)
-            subject, body = await self.msg_gen.generate_initial_message(lead, "email")
+            if step == 1:
+                subject, body = await self.msg_gen.generate_initial_message(lead, "email")
+            else:
+                subject, body = await self.msg_gen.generate_followup(lead, step, "email")
             await sender.send_email(email, subject, body)
             await self.db.log_outreach(lead_id, "email", subject, body)
             await self.db.mark_email_sent(seq_id)
             sent_count += 1
+            await asyncio.sleep(2)  # Rate limit
         return sent_count
 
     async def process_pending_whatsapp(self) -> int:
@@ -142,10 +146,14 @@ class OutreachSequence:
         for seq_id, lead_id, channel, step, phone, name, company in pending:
             if channel == "whatsapp":
                 lead = await self.db.get_lead_by_id(lead_id)
-                _, body = await self.msg_gen.generate_initial_message(lead, "whatsapp")
+                if step == 1:
+                    _, body = await self.msg_gen.generate_initial_message(lead, "whatsapp")
+                else:
+                    _, body = await self.msg_gen.generate_followup(lead, step, "whatsapp")
                 if self.whatsapp:
                     await self.whatsapp.send_message(phone, body)
                 await self.db.log_outreach(lead_id, "whatsapp", "", body)
                 await self.db.mark_message_sent(seq_id)
                 sent_count += 1
+                await asyncio.sleep(2)  # Rate limit
         return sent_count

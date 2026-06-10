@@ -112,48 +112,55 @@ async def main_loop():
         
         outbound = OutreachSequence(db, msg_gen, whatsapp)
         
-        if choice == "1":
-            count = await run_prospecting(db, scraper, scorer, outbound)
-            print(f"Found {count} prospects")
-        
-        elif choice == "2":
-            sent = await run_outreach(db, outbound, "email")
-            print(f"Sent {sent} emails")
-        
-        elif choice == "3":
-            sent = await run_outreach(db, outbound, "whatsapp")
-            print(f"Sent {sent} WhatsApp messages")
-        
-        elif choice == "4":
-            leads = await db.get_leads_by_status("hot")
-            for lead in leads[:10]:
-                print(f" - {lead[1]} (Score: {lead[9]})")
-        
-        elif choice == "5":
-            print("\nPending emails:")
-            emails = await db.get_pending_emails()
-            for e in emails[:5]:
-                print(f" - Lead {e[1]}: Step {e[2]}")
+        try:
+            if choice == "1":
+                count = await run_prospecting(db, scraper, scorer, outbound)
+                print(f"Found {count} prospects")
             
-            print("\nPending WhatsApp messages:")
-            msgs = await db.get_pending_messages()
-            for m in msgs[:5]:
-                print(f" - Lead {m[1]}: Step {m[2]}")
-        
-        elif choice == "6":
-            chart, stats = await analytics.generate_daily_report()
-            print(f"Report saved: {chart}")
-            print(f"Stats: {stats}")
-        
-        elif choice == "7" and not show_whatsapp_menu:
-            print("Connecting WhatsApp Web (browser will open)...")
-            await whatsapp.start()
-            show_whatsapp_menu = True
-            print("WhatsApp connected! QR code scanned.")
-        
-        elif choice == "8":
-            await db.close()
-            break
+            elif choice == "2":
+                sent = await run_outreach(db, outbound, "email")
+                print(f"Sent {sent} emails")
+            
+            elif choice == "3":
+                sent = await run_outreach(db, outbound, "whatsapp")
+                print(f"Sent {sent} WhatsApp messages")
+            
+            elif choice == "4":
+                leads = await db.get_leads_by_status("hot")
+                for lead in leads[:10]:
+                    if len(lead) > 1:
+                        print(f" - {lead[1]} (Score: {lead[9] if len(lead) > 9 else 'N/A'})")
+            
+            elif choice == "5":
+                print("\nPending emails:")
+                emails = await db.get_pending_emails()
+                for e in emails[:5]:
+                    if len(e) > 1:
+                        print(f" - Lead {e[1]}: Step {e[2] if len(e) > 2 else 'unknown'}")
+                
+                print("\nPending WhatsApp messages:")
+                msgs = await db.get_pending_messages()
+                for m in msgs[:5]:
+                    if len(m) > 1:
+                        print(f" - Lead {m[1]}: Step {m[2] if len(m) > 2 else 'unknown'}")
+            
+            elif choice == "6":
+                chart, stats = await analytics.generate_daily_report()
+                print(f"Report saved: {chart}")
+                print(f"Stats: {stats}")
+            
+            elif choice == "7" and not show_whatsapp_menu:
+                print("Connecting WhatsApp Web (browser will open)...")
+                await whatsapp.start()
+                show_whatsapp_menu = True
+                print("WhatsApp connected! QR code scanned.")
+            
+            elif choice == "8":
+                await db.close()
+                break
+        except Exception as exc:
+            logger.error(f"Error: {exc}")
+            print(f"Error: {exc}")
 
 
 if __name__ == "__main__":

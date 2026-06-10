@@ -1,7 +1,7 @@
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List
 
 from playwright.async_api import async_playwright
 
@@ -21,7 +21,6 @@ class WhatsAppBot:
         self.browser = await self.playwright.chromium.launch_persistent_context(
             user_data_dir=str(self.data_dir),
             headless=False,
-            args=["--no-sandbox"]
         )
         self.page = await self.browser.new_page()
         await self.page.goto("https://web.whatsapp.com")
@@ -35,22 +34,31 @@ class WhatsAppBot:
             logger.warning("Please scan QR code to log in")
             input("Press Enter after scanning QR code...")
 
+    def _format_phone(self, phone: str) -> str:
+        """Format phone number for WhatsApp (remove +, add country code if missing)."""
+        phone = phone.replace("+", "").replace("-", "").replace(" ", "")
+        if not phone.startswith("1") and len(phone) == 10:
+            phone = "1" + phone  # Add US country code
+        return phone
+
     async def send_message(self, phone: str, message: str) -> bool:
         try:
+            phone = self._format_phone(phone)
             url = f"https://web.whatsapp.com/send?phone={phone}"
             await self.page.goto(url)
             
-            await self.page.wait_for_selector('[aria-label="Type a message"]', timeout=10000)
+            await self.page.wait_for_selector('[aria-label="Type a message"]', timeout=15000)
             await self.page.fill('[aria-label="Type a message"]', message)
             await self.page.keyboard.press("Enter")
             
+            await asyncio.sleep(1)  # Wait for send
             logger.info(f"Message sent to {phone}")
             return True
         except Exception as exc:
             logger.error(f"Failed to send WhatsApp to {phone}: {exc}")
             return False
 
-    async def get_new_messages(self) -> list:
+    async def get_new_messages(self) -> List[str]:
         messages = []
         try:
             chat_elements = await self.page.query_selector_all('.copyable-text.selectable-text')
