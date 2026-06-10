@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 from src.database import LeadDatabase
 from src.ai_client import AIClient
 from src.scrapers.prospect_scraper import LeadScraper
+from src.scrapers.linkedin_scraper import LinkedInScraper
 from src.outreach.email_generator import MessageGenerator, OutreachSequence
 from src.outreach.email_sender import EmailSender, LeadScorer
 from src.outreach.email_response_handler import EmailResponsePoller
@@ -95,6 +96,51 @@ async def check_email_responses(poller):
         print(f" - Response ID {r[0]}: {r[3]} ({r[4] if len(r) > 4 else 'unknown'})")
 
 
+async def run_linkedin_prospecting(db, scraper, scorer, linkedin_scraper, outbound):
+    """Run LinkedIn Sales Navigator prospecting and save leads."""
+    profile_path = Path(__file__).parent / "config" / "agency_profile.json"
+    with open(profile_path, encoding="utf-8") as f:
+        profile = json.load(f)
+    
+    industries = profile.get("target_client_profile", {}).get("industries", [])
+    locations = profile.get("target_client_profile", {}).get("geographic_focus", [])
+    
+    total_found = 0
+    for niche in industries[:2]:
+        for loc in locations[:2]:
+            print(f"LinkedIn search: {niche} in {loc}")
+            leads = await linkedin_scraper.search_prospects(niche, loc, 5)
+            
+            for lead in leads:
+                lead_dict = {
+                    "contact_name": lead.get("contact_name"),
+                    "contact_title": lead.get("contact_title"),
+                    "company_name": lead.get("company_name"),
+                    "website": lead.get("website"),
+                    "location": lead.get("location"),
+                    "industry": niche,
+                    "source": "linkedin",
+                }
+                
+                score = scorer.score_lead(lead_dict)
+                category = scorer.categorize_lead(score)
+                lead_dict["score"] = score
+                
+                lead_id = await db.add_lead(lead_dict)
+                await db.update_lead_status(lead_id, category)
+                
+                if lead.get("contact_name"):
+                    await outbound.schedule_sequence(lead_id, "email")
+                    await outbound.schedule_sequence(lead_id, "whatsapp")
+                
+                logger.info(f"LinkedIn lead: {lead.get('contact_name')} at {lead.get('company_name')}")
+                total_found += 1
+            
+            await asyncio.sleep(5)
+    
+    return total_found
+
+
 async def check_whatsapp_responses(whatsapp):
     if not whatsapp.page:
         print("WhatsApp not connected. Connect first (option 7).")
@@ -126,6 +172,7 @@ async def main_loop():
     analytics = Analytics(db)
     outbound = OutreachSequence(db, msg_gen, whatsapp)
     email_poller = EmailResponsePoller(db, ai)
+    linkedin_scraper = LinkedInScraper()
     
     show_whatsapp_menu = False
     
@@ -141,7 +188,8 @@ async def main_loop():
             print("7. Connect WhatsApp (one-time setup)")
         print("8. Check email responses")
         print("9. Check WhatsApp responses")
-        print("10. Exit")
+        print("10. Run LinkedIn prospecting")
+        print("11. Exit")
         
         choice = input("Select option: ").strip()
         
@@ -191,10 +239,14 @@ async def main_loop():
             elif choice == "8":
                 await check_email_responses(email_poller)
             
-            elif choice == "9":
+elif choice == "9":
                 await check_whatsapp_responses(whatsapp)
             
             elif choice == "10":
+                count = await run_linkedin_prospecting(db, scraper, scorer, linkedin_scraper, outbound)
+                print(f"Found {count} LinkedIn leads")
+            
+            elif choice == "11":
                 await db.close()
                 break
         except Exception as exc:

@@ -6,6 +6,8 @@ import os
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 
+from src.outreach.email_sender import EmailSender
+
 logger = logging.getLogger(__name__)
 
 

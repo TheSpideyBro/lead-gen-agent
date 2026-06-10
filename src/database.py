@@ -1,6 +1,7 @@
 import aiosqlite
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -161,13 +162,6 @@ class LeadDatabase:
         )
         await self.db.commit()
 
-    async def schedule_email(self, lead_id: int, step: int, scheduled_for: str):
-        await self.db.execute(
-            "INSERT INTO email_sequences (lead_id, step, scheduled_for) VALUES (?, ?, ?)",
-            (lead_id, step, scheduled_for),
-        )
-        await self.db.commit()
-
     async def schedule_message(self, lead_id: int, channel: str, step: int, scheduled_for: str):
         await self.db.execute(
             "INSERT INTO message_sequences (lead_id, channel, step, scheduled_for) VALUES (?, ?, ?, ?)",
@@ -187,9 +181,10 @@ class LeadDatabase:
 
     async def get_pending_emails(self):
         cursor = await self.db.execute(
-            "SELECT es.id, es.lead_id, es.step, l.email, l.contact_name, l.company_name "
-            "FROM email_sequences es JOIN leads l ON es.lead_id = l.id "
-            "WHERE sent = 0 AND datetime(scheduled_for) <= datetime('now')"
+            "SELECT ms.id, ms.lead_id, ms.step, l.email, l.contact_name, l.company_name "
+            "FROM message_sequences ms JOIN leads l ON ms.lead_id = l.id "
+            "WHERE ms.channel = 'email' AND ms.sent = 0 "
+            "AND datetime(ms.scheduled_for) <= datetime('now')"
         )
         return await cursor.fetchall()
 
@@ -197,13 +192,14 @@ class LeadDatabase:
         cursor = await self.db.execute(
             "SELECT ms.id, ms.lead_id, ms.channel, ms.step, l.phone, l.contact_name, l.company_name "
             "FROM message_sequences ms JOIN leads l ON ms.lead_id = l.id "
-            "WHERE sent = 0 AND datetime(scheduled_for) <= datetime('now')"
+            "WHERE ms.channel = 'whatsapp' AND ms.sent = 0 "
+            "AND datetime(ms.scheduled_for) <= datetime('now')"
         )
         return await cursor.fetchall()
 
     async def mark_email_sent(self, sequence_id: int):
         await self.db.execute(
-            "UPDATE email_sequences SET sent = 1 WHERE id = ?", (sequence_id,)
+            "UPDATE message_sequences SET sent = 1 WHERE id = ?", (sequence_id,)
         )
         await self.db.commit()
 
@@ -240,14 +236,16 @@ class LeadDatabase:
 
     async def reschedule_sequence(self, lead_id: int, extra_days: int = 5):
         cursor = await self.db.execute(
-            "SELECT step FROM email_sequences WHERE lead_id = ? AND sent = 0 ORDER BY step ASC LIMIT 1",
+            "SELECT step FROM message_sequences "
+            "WHERE lead_id = ? AND channel = 'email' AND sent = 0 ORDER BY step ASC LIMIT 1",
             (lead_id,)
         )
         seq = await cursor.fetchone()
         if seq:
             new_time = (datetime.now() + timedelta(days=extra_days)).isoformat()
             await self.db.execute(
-                "UPDATE email_sequences SET scheduled_for = ? WHERE lead_id = ? AND sent = 0",
+                "UPDATE message_sequences SET scheduled_for = ? "
+                "WHERE lead_id = ? AND channel = 'email' AND sent = 0",
                 (new_time, lead_id)
             )
             await self.db.commit()
