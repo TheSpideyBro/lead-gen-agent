@@ -32,7 +32,7 @@ class GoogleSearchScraper:
         self.use_api = bool(self.api_key and self.search_id)
 
     async def search_prospects(self, query: str, max_results: int = 20) -> List[Lead]:
-        leads = []
+        leads: List[Lead] = []
         if self.use_api:
             leads = await self._api_search(query, max_results)
         else:
@@ -40,6 +40,7 @@ class GoogleSearchScraper:
         return leads[:max_results]
 
     async def _api_search(self, query: str, max_results: int) -> List[Lead]:
+        leads: List[Lead] = []
         url = "https://www.googleapis.com/customsearch/v1"
         async with aiohttp.ClientSession() as session:
             params = {

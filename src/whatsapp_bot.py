@@ -32,7 +32,7 @@ class WhatsAppBot:
             logger.info("WhatsApp Web logged in")
         except Exception:
             logger.warning("Please scan QR code to log in")
-            input("Press Enter after scanning QR code...")
+            await asyncio.to_thread(input, "Press Enter after scanning QR code...")
 
     def _format_phone(self, phone: str) -> str:
         """Format phone number for WhatsApp (remove +, add country code if missing)."""

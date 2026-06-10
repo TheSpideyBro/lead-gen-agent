@@ -52,10 +52,11 @@ async def run_prospecting(db, scraper, scorer, outbound):
             "source": lead.source,
         }
         
-        lead_id = await db.add_lead(lead_dict)
         score = scorer.score_lead(lead_dict)
         category = scorer.categorize_lead(score)
+        lead_dict["score"] = score
         
+        lead_id = await db.add_lead(lead_dict)
         await db.update_lead_status(lead_id, category)
         
         if lead.email:
@@ -71,8 +72,11 @@ async def run_prospecting(db, scraper, scorer, outbound):
 async def run_outreach(db, outbound, channel="email"):
     sent_count = 0
     if channel == "email":
-        sent = await outbound.process_pending_emails(EmailSender())
+        sender = EmailSender()
+        sent = await outbound.process_pending_emails(sender)
         print(f"Sent {sent} emails")
+        if sent > 0:
+            await sender.close()
         sent_count = sent
     elif channel == "whatsapp":
         sent = await outbound.process_pending_whatsapp()
@@ -90,9 +94,9 @@ async def main_loop():
     scraper = LeadScraper()
     scorer = LeadScorer()
     msg_gen = MessageGenerator(ai)
-    email_sender = EmailSender()
     whatsapp = WhatsAppBot()
     analytics = Analytics(db)
+    outbound = OutreachSequence(db, msg_gen, whatsapp)  # Moved outside loop
     
     show_whatsapp_menu = False
     
@@ -109,8 +113,6 @@ async def main_loop():
         print("8. Exit")
         
         choice = input("Select option: ").strip()
-        
-        outbound = OutreachSequence(db, msg_gen, whatsapp)
         
         try:
             if choice == "1":

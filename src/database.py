@@ -90,8 +90,8 @@ class LeadDatabase:
     async def add_lead(self, lead_data: dict) -> int:
         cursor = await self.db.execute(
             """INSERT INTO leads (company_name, contact_name, contact_title, email, phone, 
-                                 website, industry, location, employees, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                                 website, industry, location, employees, source, score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 lead_data.get("company_name"),
                 lead_data.get("contact_name"),
@@ -103,14 +103,21 @@ class LeadDatabase:
                 lead_data.get("location"),
                 lead_data.get("employees"),
                 lead_data.get("source"),
+                lead_data.get("score", 0),
             ),
         )
         await self.db.commit()
         return cursor.lastrowid
 
+    async def update_lead_score(self, lead_id: int, score: int):
+        await self.db.execute(
+            "UPDATE leads SET score = ? WHERE id = ?", (score, lead_id)
+        )
+        await self.db.commit()
+
     async def get_leads_by_status(self, status: str = "new"):
         cursor = await self.db.execute(
-            "SELECT * FROM leads WHERE status = ? ORDER BY score DESC", status
+            "SELECT * FROM leads WHERE status = ? ORDER BY score DESC", (status,)
         )
         return await cursor.fetchall()
 
