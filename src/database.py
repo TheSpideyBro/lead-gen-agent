@@ -80,6 +80,17 @@ class LeadDatabase:
                 sent BOOLEAN DEFAULT 0,
                 FOREIGN KEY (lead_id) REFERENCES leads(id)
             );
+            
+            CREATE TABLE IF NOT EXISTS email_responses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id INTEGER NOT NULL,
+                received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                subject TEXT,
+                body TEXT,
+                classification TEXT,
+                replied BOOLEAN DEFAULT 0,
+                FOREIGN KEY (lead_id) REFERENCES leads(id)
+            );
 
             CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
             CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(score);
@@ -190,5 +201,53 @@ class LeadDatabase:
     async def mark_message_sent(self, sequence_id: int):
         await self.db.execute(
             "UPDATE message_sequences SET sent = 1 WHERE id = ?", (sequence_id,)
+        )
+        await self.db.commit()
+
+    async def get_all_leads_with_email(self):
+        cursor = await self.db.execute(
+            "SELECT id, email FROM leads WHERE email IS NOT NULL AND status != 'unsubscribed'"
+        )
+        return await cursor.fetchall()
+
+    async def log_email_response(self, lead_id: int, subject: str, body: str, classification: str):
+        await self.db.execute(
+            "INSERT INTO email_responses (lead_id, subject, body, classification) VALUES (?, ?, ?, ?)",
+            (lead_id, subject, body, classification)
+        )
+        await self.db.commit()
+
+    async def get_unreplied_responses(self):
+        cursor = await self.db.execute(
+            "SELECT * FROM email_responses WHERE replied = 0"
+        )
+        return await cursor.fetchall()
+
+    async def mark_response_replied(self, response_id: int):
+        await self.db.execute(
+            "UPDATE email_responses SET replied = 1 WHERE id = ?", (response_id,)
+        )
+        await self.db.commit()
+
+    async def reschedule_sequence(self, lead_id: int, extra_days: int = 5):
+        cursor = await self.db.execute(
+            "SELECT step FROM email_sequences WHERE lead_id = ? AND sent = 0 ORDER BY step ASC LIMIT 1",
+            (lead_id,)
+        )
+        seq = await cursor.fetchone()
+        if seq:
+            new_time = (datetime.now() + timedelta(days=extra_days)).isoformat()
+            await self.db.execute(
+                "UPDATE email_sequences SET scheduled_for = ? WHERE lead_id = ? AND sent = 0",
+                (new_time, lead_id)
+            )
+            await self.db.commit()
+
+    async def stop_all_sequences(self, lead_id: int):
+        await self.db.execute(
+            "DELETE FROM email_sequences WHERE lead_id = ? AND sent = 0", (lead_id,)
+        )
+        await self.db.execute(
+            "DELETE FROM message_sequences WHERE lead_id = ? AND sent = 0", (lead_id,)
         )
         await self.db.commit()

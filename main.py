@@ -24,6 +24,7 @@ from src.ai_client import AIClient
 from src.scrapers.prospect_scraper import LeadScraper
 from src.outreach.email_generator import MessageGenerator, OutreachSequence
 from src.outreach.email_sender import EmailSender, LeadScorer
+from src.outreach.email_response_handler import EmailResponsePoller
 from src.whatsapp_bot import WhatsAppBot
 from src.analytics import Analytics
 
@@ -85,6 +86,15 @@ async def run_outreach(db, outbound, channel="email"):
     return sent_count
 
 
+async def check_email_responses(poller):
+    count = await poller.check_for_replies()
+    print(f"Processed {count} email replies")
+    
+    responses = await poller.get_pending_responses()
+    for r in responses[:5]:
+        print(f" - Response ID {r[0]}: {r[3]} ({r[4] if len(r) > 4 else 'unknown'})")
+
+
 async def main_loop():
     db = LeadDatabase()
     await db.connect()
@@ -96,7 +106,8 @@ async def main_loop():
     msg_gen = MessageGenerator(ai)
     whatsapp = WhatsAppBot()
     analytics = Analytics(db)
-    outbound = OutreachSequence(db, msg_gen, whatsapp)  # Moved outside loop
+    outbound = OutreachSequence(db, msg_gen, whatsapp)
+    email_poller = EmailResponsePoller(db, ai)
     
     show_whatsapp_menu = False
     
@@ -111,6 +122,7 @@ async def main_loop():
         if not show_whatsapp_menu:
             print("7. Connect WhatsApp (one-time setup)")
         print("8. Exit")
+        print("9. Check email responses")
         
         choice = input("Select option: ").strip()
         
@@ -160,6 +172,9 @@ async def main_loop():
             elif choice == "8":
                 await db.close()
                 break
+            
+            elif choice == "9":
+                await check_email_responses(email_poller)
         except Exception as exc:
             logger.error(f"Error: {exc}")
             print(f"Error: {exc}")
