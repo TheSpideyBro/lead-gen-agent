@@ -1,0 +1,68 @@
+{
+  "agency_name": "Global Digital Marketing Solutions",
+  "your_name": "Saddam Hossain Akash",
+  "your_email": "saddamhossainakash1100@gmail.com",
+  "your_phone": "+8801859892181",
+  "your_location": "Bangladesh (Remote Worldwide)",
+  "services": [
+    "SEO & Local SEO",
+    "Google Ads (PPC)",
+    "Meta/Facebook Ads",
+    "Social Media Management",
+    "Content Marketing",
+    "Email Marketing",
+    "Conversion Rate Optimization"
+  ],
+  "target_client_profile": {
+    "industries": [
+      "E-commerce",
+      "SaaS",
+      "Professional Services",
+      "Healthcare",
+      "Real Estate",
+      "Finance",
+      "Education",
+      "Fitness & Wellness",
+      "Travel & Hospitality",
+      "Food & Beverage"
+    ],
+    "company_size": {
+      "min_employees": 5,
+      "max_employees": 500
+    },
+    "revenue_range": {
+      "min": "$100K",
+      "max": "$50M"
+    },
+    "geographic_focus": [
+      "United States",
+      "United Kingdom",
+      "Canada",
+      "Australia",
+      "Germany",
+      "UAE",
+      "Singapore"
+    ],
+    "pain_points": [
+      "Need more qualified leads",
+      "Struggling with online visibility",
+      "Wasting ad spend with poor ROI",
+      "No time for social media management",
+      "In-house marketing not performing"
+    ]
+  },
+  "email_signature": "Best regards,\nSaddam Hossain Akash\nDigital Marketing Expert | Remote\n📧 {email}\n📱 {phone}\n🌐 www.youragency.com\n\nHelping businesses grow through data-driven digital marketing strategies.",
+  "case_studies": [
+    {
+      "client": "E-commerce Fashion Brand",
+      "challenge": "Low organic traffic and poor conversion",
+      "solution": "SEO + Content Marketing + Meta Ads",
+      "results": "300% traffic increase, 45% conversion improvement, $50K+ revenue in 3 months"
+    }
+  ],
+  "pricing_tiers": {
+    "starter": "$1,000/month - Basic SEO + Social Media",
+    "growth": "$2,500/month - Full Digital Marketing",
+    "enterprise": "$5,000+/month - Comprehensive Marketing"
+  }
+}

@@ -1,0 +1,27 @@
+{
+  "search_keywords": [
+    "digital marketing agency",
+    "marketing manager",
+    "CMO",
+    "marketing director",
+    "growth hacker",
+    "head of marketing",
+    "founder",
+    "CEO"
+  ],
+  "excluded_keywords": [
+    "job",
+    "career",
+    "hiring",
+    "recruitment"
+  ],
+  "max_prospects_per_day": 50,
+  "outreach_channels": ["email", "linkedin"],
+  "daily_email_limit": 30,
+  "daily_linkedin_limit": 20,
+  "timezone": "Asia/Dhaka",
+  "working_hours": {
+    "start": 9,
+    "end": 18
+  }
+}
