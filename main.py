@@ -28,6 +28,7 @@ from src.outreach.email_sender import EmailSender, LeadScorer
 from src.outreach.email_response_handler import EmailResponsePoller
 from src.whatsapp_bot import WhatsAppBot
 from src.analytics import Analytics
+from src.tracking.server import TrackingServer, get_tracking_port
 
 
 async def run_prospecting(db, scraper, scorer, outbound):
@@ -157,10 +158,25 @@ async def check_whatsapp_responses(whatsapp):
         print(f" - WhatsApp {r[1]}: {r[3]} ({r[2][:50] if r[2] else 'no body'})")
 
 
+async def show_open_stats(db):
+    rows = await db.get_open_stats_by_step()
+    if not rows:
+        print("No email opens tracked yet.")
+        return
+    print("\nEmail open rate by sequence step:")
+    print(f"{'Step':<6}{'Sent':<8}{'Opened':<8}{'Open Rate':<10}")
+    for step, sent, opened in rows:
+        rate = f"{(opened / sent * 100):.1f}%" if sent else "0.0%"
+        print(f"{step:<6}{sent:<8}{opened:<8}{rate:<10}")
+
+
 async def main_loop():
     db = LeadDatabase()
     await db.connect()
     logger.info("Database connected")
+
+    tracking_server = TrackingServer(db, port=get_tracking_port())
+    await tracking_server.start()
     
     ai = AIClient()
     scraper = LeadScraper()
@@ -189,7 +205,8 @@ async def main_loop():
         print("8. Check email responses")
         print("9. Check WhatsApp responses")
         print("10. Run LinkedIn prospecting")
-        print("11. Exit")
+        print("11. View email open stats")
+        print("12. Exit")
         
         choice = input("Select option: ").strip()
         
@@ -210,7 +227,7 @@ async def main_loop():
                 leads = await db.get_leads_by_status("hot")
                 for lead in leads[:10]:
                     if len(lead) > 1:
-                        print(f" - {lead[1]} (Score: {lead[9] if len(lead) > 9 else 'N/A'})")
+                        print(f" - {lead[1]} (Score: {lead[11] if len(lead) > 11 else 'N/A'})")
             
             elif choice == "5":
                 print("\nPending emails:")
@@ -223,7 +240,7 @@ async def main_loop():
                 msgs = await db.get_pending_messages()
                 for m in msgs[:5]:
                     if len(m) > 1:
-                        print(f" - Lead {m[1]}: Step {m[2] if len(m) > 2 else 'unknown'}")
+                        print(f" - Lead {m[1]}: Step {m[3] if len(m) > 3 else 'unknown'}")
             
             elif choice == "6":
                 chart, stats = await analytics.generate_daily_report()
@@ -238,15 +255,19 @@ async def main_loop():
             
             elif choice == "8":
                 await check_email_responses(email_poller)
-            
-elif choice == "9":
+
+            elif choice == "9":
                 await check_whatsapp_responses(whatsapp)
-            
+
             elif choice == "10":
                 count = await run_linkedin_prospecting(db, scraper, scorer, linkedin_scraper, outbound)
                 print(f"Found {count} LinkedIn leads")
-            
+
             elif choice == "11":
+                await show_open_stats(db)
+
+            elif choice == "12":
+                await tracking_server.stop()
                 await db.close()
                 break
         except Exception as exc:

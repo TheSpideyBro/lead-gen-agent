@@ -133,7 +133,7 @@ class OutreachSequence:
                 subject, body = await self.msg_gen.generate_initial_message(lead, "email")
             else:
                 subject, body = await self.msg_gen.generate_followup(lead, step, "email")
-            await sender.send_email(email, subject, body)
+            await sender.send_email(email, subject, body, lead_id=lead_id, sequence_id=seq_id)
             await self.db.log_outreach(lead_id, "email", subject, body)
             await self.db.mark_email_sent(seq_id)
             sent_count += 1

@@ -7,6 +7,8 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from typing import Optional
 
+from src.tracking.tracker import tracking_pixel_html
+
 logger = logging.getLogger(__name__)
 
 
@@ -45,16 +47,24 @@ class EmailSender:
                 pass
             self._server = None
 
-    async def send_email(self, to_email: str, subject: str, body: str) -> bool:
+    async def send_email(self, to_email: str, subject: str, body: str,
+                         lead_id: Optional[int] = None,
+                         sequence_id: Optional[int] = None) -> bool:
         if not self.can_send():
             logger.warning("Email credentials not configured")
             return False
 
-        msg = MIMEMultipart()
+        msg = MIMEMultipart("alternative")
         msg["From"] = f"{self.from_name} <{self.email_address}>"
         msg["To"] = to_email
         msg["Subject"] = subject
         msg.attach(MIMEText(body, "plain"))
+
+        if lead_id is not None and sequence_id is not None:
+            pixel = tracking_pixel_html(lead_id, sequence_id)
+            html_body = body.replace("\n", "<br>\n")
+            html = f"<html><body>{html_body}{pixel}</body></html>"
+            msg.attach(MIMEText(html, "html"))
 
         try:
             server = await self._connect()
@@ -89,7 +99,7 @@ class LeadScorer:
     def score_lead(self, lead: dict) -> int:
         score = 0
 
-        industry = lead.get("industry", "")
+        industry = lead.get("industry") or ""
         if industry in self.high_value_industries:
             score += 30
         elif industry in self.medium_value_industries:
@@ -108,13 +118,16 @@ class LeadScorer:
         if lead.get("email"):
             score += 20
 
-        location = lead.get("location", "")
+        location = lead.get("location") or ""
         if any(loc in location for loc in ["US", "UK", "Canada", "Australia", "Germany", "UAE"]):
             score += 20
 
         website = lead.get("website")
         if website and "linkedin" not in website.lower():
             score += 10
+
+        if lead.get("opened"):
+            score += 15
 
         return score
 
@@ -125,3 +138,14 @@ class LeadScorer:
             return "warm"
         else:
             return "cold"
+
+    async def rescore_opened_lead(self, db, lead_id: int):
+        """Recompute score with the open bonus and persist score + category."""
+        lead = await db.get_lead_by_id(lead_id)
+        if not lead:
+            return
+        lead["opened"] = True
+        score = self.score_lead(lead)
+        category = self.categorize_lead(score)
+        await db.update_lead_score(lead_id, score)
+        await db.update_lead_status(lead_id, category)

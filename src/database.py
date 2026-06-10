@@ -102,9 +102,18 @@ class LeadDatabase:
                 classification TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS email_opens (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id INTEGER,
+                sequence_id INTEGER,
+                opened_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                ip_address TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
             CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(score);
             CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email);
+            CREATE INDEX IF NOT EXISTS idx_opens_lead ON email_opens(lead_id);
         """)
         await self.db.commit()
 
@@ -258,3 +267,31 @@ class LeadDatabase:
             "DELETE FROM message_sequences WHERE lead_id = ? AND sent = 0", (lead_id,)
         )
         await self.db.commit()
+
+    async def log_email_open(self, lead_id, sequence_id, ip_address: str = ""):
+        await self.db.execute(
+            "INSERT INTO email_opens (lead_id, sequence_id, ip_address) VALUES (?, ?, ?)",
+            (lead_id, sequence_id, ip_address),
+        )
+        await self.db.execute(
+            "UPDATE leads SET last_contacted = CURRENT_TIMESTAMP WHERE id = ?", (lead_id,)
+        )
+        await self.db.commit()
+
+    async def has_lead_opened(self, lead_id: int) -> bool:
+        cursor = await self.db.execute(
+            "SELECT 1 FROM email_opens WHERE lead_id = ? LIMIT 1", (lead_id,)
+        )
+        return (await cursor.fetchone()) is not None
+
+    async def get_open_stats_by_step(self):
+        cursor = await self.db.execute(
+            "SELECT ms.step, "
+            "COUNT(DISTINCT ms.id) AS sent, "
+            "COUNT(DISTINCT eo.sequence_id) AS opened "
+            "FROM message_sequences ms "
+            "LEFT JOIN email_opens eo ON eo.sequence_id = ms.id "
+            "WHERE ms.channel = 'email' AND ms.sent = 1 "
+            "GROUP BY ms.step ORDER BY ms.step"
+        )
+        return await cursor.fetchall()
