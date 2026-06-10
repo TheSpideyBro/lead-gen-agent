@@ -91,6 +91,15 @@ class LeadDatabase:
                 replied BOOLEAN DEFAULT 0,
                 FOREIGN KEY (lead_id) REFERENCES leads(id)
             );
+            
+            CREATE TABLE IF NOT EXISTS whatsapp_responses (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                lead_id INTEGER,
+                phone TEXT,
+                received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                body TEXT,
+                classification TEXT
+            );
 
             CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
             CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(score);

@@ -95,6 +95,22 @@ async def check_email_responses(poller):
         print(f" - Response ID {r[0]}: {r[3]} ({r[4] if len(r) > 4 else 'unknown'})")
 
 
+async def check_whatsapp_responses(whatsapp):
+    if not whatsapp.page:
+        print("WhatsApp not connected. Connect first (option 7).")
+        return
+    
+    processed = await whatsapp.poll_new_messages()
+    print(f"Processed {processed} WhatsApp messages")
+    
+    cursor = await whatsapp.db.db.execute(
+        "SELECT id, phone, body, classification FROM whatsapp_responses ORDER BY received_at DESC LIMIT 5"
+    )
+    responses = await cursor.fetchall()
+    for r in responses:
+        print(f" - WhatsApp {r[1]}: {r[3]} ({r[2][:50] if r[2] else 'no body'})")
+
+
 async def main_loop():
     db = LeadDatabase()
     await db.connect()
@@ -105,6 +121,8 @@ async def main_loop():
     scorer = LeadScorer()
     msg_gen = MessageGenerator(ai)
     whatsapp = WhatsAppBot()
+    whatsapp.db = db
+    whatsapp.ai = ai
     analytics = Analytics(db)
     outbound = OutreachSequence(db, msg_gen, whatsapp)
     email_poller = EmailResponsePoller(db, ai)
@@ -121,8 +139,9 @@ async def main_loop():
         print("6. Daily report")
         if not show_whatsapp_menu:
             print("7. Connect WhatsApp (one-time setup)")
-        print("8. Exit")
-        print("9. Check email responses")
+        print("8. Check email responses")
+        print("9. Check WhatsApp responses")
+        print("10. Exit")
         
         choice = input("Select option: ").strip()
         
@@ -170,11 +189,14 @@ async def main_loop():
                 print("WhatsApp connected! QR code scanned.")
             
             elif choice == "8":
-                await db.close()
-                break
+                await check_email_responses(email_poller)
             
             elif choice == "9":
-                await check_email_responses(email_poller)
+                await check_whatsapp_responses(whatsapp)
+            
+            elif choice == "10":
+                await db.close()
+                break
         except Exception as exc:
             logger.error(f"Error: {exc}")
             print(f"Error: {exc}")
