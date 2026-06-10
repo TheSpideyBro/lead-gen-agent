@@ -1,83 +1,184 @@
 # Lead Generation Agent
 
-AI-powered sales automation for digital marketing agencies. Outreach via email AND WhatsApp Business.
+> AI-powered sales automation for digital marketing agencies — automated prospecting, multi-channel outreach, and intelligent reply handling across **Email**, **WhatsApp**, and **LinkedIn**.
+
+<p align="left">
+  <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+">
+  <img src="https://img.shields.io/badge/async-asyncio-green.svg" alt="Asyncio">
+  <img src="https://img.shields.io/badge/AI-Groq%20%7C%20Gemini-orange.svg" alt="AI Providers">
+  <img src="https://img.shields.io/badge/license-MIT-lightgrey.svg" alt="License MIT">
+</p>
+
+---
+
+## Overview
+
+Lead Generation Agent is a standalone command-line tool that runs an end-to-end outbound sales pipeline. It discovers prospects, scores them, generates personalized multi-step outreach with an LLM, sends it over email and WhatsApp, and classifies inbound replies to auto-respond, qualify, or unsubscribe leads — all from a single CLI.
+
+Built on `asyncio` for concurrent I/O, with a local SQLite store and pluggable AI providers (Groq primary, Google Gemini fallback).
+
+---
 
 ## Features
 
-- **Prospect Discovery**: Free scrapers using DuckDuckGo to find businesses
-- **AI Email Sequences**: 3-step nurture sequences via Groq/Gemini (free)
-- **WhatsApp Outreach**: Playwright automation for WhatsApp Business
-- **Lead Scoring**: Industry/location/size scoring system
-- **Response Handling**: AI-powered reply classification and response
-- **CLI Interface**: Full control from command line
+| Capability | Description |
+|------------|-------------|
+| **Prospect Discovery** | DuckDuckGo HTML scraping (no API key) + optional Google Custom Search and LinkedIn/Sales Navigator scraping via Playwright |
+| **Lead Scoring** | Weighted scoring on industry, company size, location, and contactability → Hot / Warm / Cold tiers |
+| **AI Outreach Sequences** | 3-step nurture cadences for email and WhatsApp, with personalized copy generated per lead |
+| **Reply Intelligence** | IMAP + WhatsApp polling with AI classification (interested / question / not interested / out-of-office) and automated responses |
+| **Auto-Qualification** | Interested leads receive a Calendly link and are promoted; opt-outs are unsubscribed and removed from sequences |
+| **Analytics** | Matplotlib dashboards summarizing pipeline health and outreach activity |
 
-## Setup
+---
+
+## Architecture
+
+```
+lead-gen-agent/
+├── main.py                       # CLI entry point and menu loop
+├── connect_whatsapp.py           # One-time WhatsApp Web session setup
+├── requirements.txt
+├── config/
+│   ├── agency_profile.json       # Your agency, services, ICP, case studies
+│   └── prospect_preferences.json # Keywords, daily limits, working hours
+├── src/
+│   ├── database.py               # Async SQLite (aiosqlite) data layer
+│   ├── ai_client.py              # Multi-provider LLM client (Groq / Gemini)
+│   ├── analytics.py              # Stats + matplotlib reporting
+│   ├── scrapers/
+│   │   ├── prospect_scraper.py   # DuckDuckGo / Google search + email extraction
+│   │   └── linkedin_scraper.py   # Playwright LinkedIn / Sales Navigator scraper
+│   ├── outreach/
+│   │   ├── email_sender.py       # SMTP sender (singleton) + lead scorer
+│   │   ├── email_generator.py    # AI message generation + sequence scheduler
+│   │   ├── email_response_handler.py  # IMAP polling + AI reply classification
+│   │   └── response_handler.py   # Shared conversation/intent helpers
+│   └── whatsapp_bot.py           # Playwright WhatsApp Web automation
+└── data/                         # SQLite DB + browser sessions (gitignored)
+```
+
+---
+
+## Quick Start
+
+### Prerequisites
+
+- Python **3.11+**
+- A free [Groq API key](https://console.groq.com) (or Google Gemini key)
+- A Gmail account with an [App Password](https://support.google.com/accounts/answer/185833) for sending/reading mail
+
+### Installation
 
 ```bash
-# Install dependencies
+# 1. Clone
+git clone https://github.com/TheSpideyBro/lead-gen-agent.git
+cd lead-gen-agent
+
+# 2. Create a virtual environment
+python -m venv venv
+venv\Scripts\activate        # Windows
+# source venv/bin/activate   # macOS / Linux
+
+# 3. Install dependencies
 pip install -r requirements.txt
 playwright install chromium
 
-# Configure environment
-copy .env.example .env
+# 4. Configure environment
+copy .env.example .env       # Windows  (cp on macOS/Linux)
 # Edit .env with your credentials
 
-# Run the agent
+# 5. Run
 python main.py
 ```
 
-## Free Resources Required
+---
 
-- **Groq API**: https://console.groq.com (free, required for AI)
-- **Gmail**: App password for sending emails
-- **WhatsApp Business**: Phone number with WhatsApp
+## Configuration
 
-## .env Configuration
+### Environment Variables (`.env`)
 
-```
-GROQ_API_KEY=your_groq_key
-EMAIL_ADDRESS=you@gmail.com
-EMAIL_PASSWORD=app_password
-FROM_NAME=Your Name
-SMTP_SERVER=smtp.gmail.com
-SMTP_PORT=587
-AI_MAX_RETRIES=3
-```
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GROQ_API_KEY` | ✅ | Primary AI provider key |
+| `GOOGLE_AI_API_KEY` | — | Fallback AI provider (Gemini) |
+| `EMAIL_ADDRESS` | ✅* | Gmail address for sending/receiving |
+| `EMAIL_PASSWORD` | ✅* | Gmail **App Password** (not your login password) |
+| `FROM_NAME` | — | Display name on outgoing email |
+| `SMTP_SERVER` / `SMTP_PORT` | — | Defaults: `smtp.gmail.com` / `587` |
+| `IMAP_SERVER` / `IMAP_PORT` | — | Defaults: `imap.gmail.com` / `993` |
+| `CALENDLY_LINK` | — | Booking link sent to interested leads |
+| `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` | — | LinkedIn login for the scraper (optional) |
+| `AI_MAX_RETRIES` | — | LLM retry attempts (default `3`) |
+
+> \* Required only for the email channel.
+
+### Agency Profile
+
+Edit `config/agency_profile.json` to define your agency name, services, ideal customer profile, case studies, and email signature. This drives all AI-generated copy. Adjust search keywords and daily limits in `config/prospect_preferences.json`.
+
+---
 
 ## Usage
 
-Run `python main.py` and select options:
-1. Run prospecting (find new leads)
-2. Send email outreach
-3. Send WhatsApp outreach
-4. View hot leads
-5. View pending followups
-6. Daily report
-7. Connect WhatsApp (one-time QR scan)
-8. Exit
+Run `python main.py` and choose from the interactive menu:
 
-## WhatsApp Setup
+| Option | Action |
+|--------|--------|
+| `1` | Run prospecting (DuckDuckGo / Google) |
+| `2` | Send pending email outreach |
+| `3` | Send pending WhatsApp outreach |
+| `4` | View hot leads (score ≥ 60) |
+| `5` | View pending follow-ups |
+| `6` | Generate daily analytics report |
+| `7` | Connect WhatsApp (one-time QR scan) |
+| `8` | Check & classify email replies |
+| `9` | Check & classify WhatsApp replies |
+| `10` | Run LinkedIn prospecting |
+| `11` | Exit |
 
-On first run, select option 7 to connect WhatsApp Web. A browser window will open - scan the QR code with your WhatsApp Business app. Your session persists in `data/whatsapp/` for future runs.
+### WhatsApp Setup
 
-## Outreach Channels
+On first use, select **option 7**. A browser opens to WhatsApp Web — scan the QR code with your phone. The session persists in `data/whatsapp/`, so you only do this once.
 
-**Email**: 3-step sequence (immediate, 48h followup, 96h followup)  
-**WhatsApp**: 3-step sequence (immediate, 24h followup, 72h followup)
+---
 
-## Lead Scoring
+## How It Works
 
-Hot leads (60+): High-value industry + employees + location + email  
-Warm leads (40-59): Medium fit  
-Cold leads (<40): Standard prospects
+**Outreach cadences** are scheduled the moment a lead is added and processed when due:
+
+- **Email:** immediate → +48h → +96h
+- **WhatsApp:** immediate → +24h → +72h
+
+**Lead scoring** awards points for high-value industries, company size, target geography, and a discoverable email, then buckets leads into:
+
+| Tier | Score | Priority |
+|------|-------|----------|
+| 🔥 Hot | 60+ | Strong fit — prioritize |
+| 🌤️ Warm | 40–59 | Medium fit |
+| ❄️ Cold | < 40 | Low priority |
+
+**Reply handling** polls inbox and WhatsApp, classifies each message with the LLM, and acts automatically: interested → Calendly + qualify, question → AI answer, not-interested → unsubscribe and stop all sequences.
+
+---
 
 ## Automation
 
-For 24/7 operation, use Windows Task Scheduler:
-```
-# Run prospecting daily at 9 AM
-python main.py --prospect
+Schedule unattended runs with cron (Linux/macOS) or Task Scheduler (Windows):
 
-# Process followups every 6 hours
-python main.py --outreach
+```bash
+python main.py --prospect    # discover new leads daily
+python main.py --outreach     # process due follow-ups
 ```
+
+---
+
+## Disclaimer
+
+This tool automates outreach across email, WhatsApp, and LinkedIn. You are responsible for complying with the terms of service of each platform and with applicable anti-spam and data-protection laws (e.g. CAN-SPAM, GDPR). Use responsibly, respect opt-outs, and only contact prospects where you have a lawful basis to do so.
+
+---
+
+## License
+
+Released under the MIT License.
