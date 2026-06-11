@@ -10,6 +10,8 @@ from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=30)
+
 
 @dataclass
 class Lead:
@@ -42,7 +44,7 @@ class GoogleSearchScraper:
     async def _api_search(self, query: str, max_results: int) -> List[Lead]:
         leads: List[Lead] = []
         url = "https://www.googleapis.com/customsearch/v1"
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT) as session:
             params = {
                 "key": self.api_key,
                 "cx": self.search_id,
@@ -71,7 +73,7 @@ class GoogleSearchScraper:
         url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
         leads = []
         
-        async with aiohttp.ClientSession() as session:
+        async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT) as session:
             async with session.get(url, headers=headers) as resp:
                 html = await resp.text()
                 soup = BeautifulSoup(html, "html.parser")
@@ -109,21 +111,16 @@ class GoogleSearchScraper:
 class EmailExtractor:
     async def find_email(self, website: str, company: str) -> Optional[str]:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        email_patterns = [
-            f"info@{company.lower().replace(' ', '')}.com",
-            f"hello@{company.lower().replace(' ', '')}.com",
-            f"contact@{company.lower().replace(' ', '')}.com",
-        ]
+        import re
         
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT) as session:
                 contact_url = f"{website.rstrip('/')}/contact"
-                async with session.get(contact_url, headers=headers, timeout=10) as resp:
+                async with session.get(contact_url, headers=headers) as resp:
                     if resp.status == 200:
                         html = await resp.text()
                         soup = BeautifulSoup(html, "html.parser")
                         text = soup.get_text()
-                        import re
                         emails = re.findall(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}", text)
                         if emails:
                             return emails[0]

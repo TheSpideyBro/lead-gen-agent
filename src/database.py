@@ -1,13 +1,20 @@
 import aiosqlite
 import asyncio
 import logging
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-DB_PATH = Path(__file__).parent.parent / "data" / "lead_bot.db"
+
+def get_db_path() -> Path:
+    db_path = os.getenv("LEAD_DB_PATH", "data/lead_bot.db")
+    return Path(db_path)
+
+
+DB_PATH = get_db_path()
 
 
 class LeadDatabase:
@@ -63,16 +70,7 @@ class LeadDatabase:
                 FOREIGN KEY (lead_id) REFERENCES leads(id)
             );
 
-            CREATE TABLE IF NOT EXISTS email_sequences (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                lead_id INTEGER NOT NULL,
-                step INTEGER NOT NULL,
-                scheduled_for TIMESTAMP,
-                sent BOOLEAN DEFAULT 0,
-                FOREIGN KEY (lead_id) REFERENCES leads(id)
-            );
-
-            CREATE TABLE IF NOT EXISTS message_sequences (
+            CREATE TABLE IF NOT EXISTS sequences (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 lead_id INTEGER NOT NULL,
                 channel TEXT,
@@ -173,7 +171,7 @@ class LeadDatabase:
 
     async def schedule_message(self, lead_id: int, channel: str, step: int, scheduled_for: str):
         await self.db.execute(
-            "INSERT INTO message_sequences (lead_id, channel, step, scheduled_for) VALUES (?, ?, ?, ?)",
+            "INSERT INTO sequences (lead_id, channel, step, scheduled_for) VALUES (?, ?, ?, ?)",
             (lead_id, channel, step, scheduled_for),
         )
         await self.db.commit()
@@ -190,31 +188,31 @@ class LeadDatabase:
 
     async def get_pending_emails(self):
         cursor = await self.db.execute(
-            "SELECT ms.id, ms.lead_id, ms.step, l.email, l.contact_name, l.company_name "
-            "FROM message_sequences ms JOIN leads l ON ms.lead_id = l.id "
-            "WHERE ms.channel = 'email' AND ms.sent = 0 "
-            "AND datetime(ms.scheduled_for) <= datetime('now')"
+            "SELECT s.id, s.lead_id, s.step, l.email, l.contact_name, l.company_name "
+            "FROM sequences s JOIN leads l ON s.lead_id = l.id "
+            "WHERE s.channel = 'email' AND s.sent = 0 "
+            "AND datetime(s.scheduled_for) <= datetime('now')"
         )
         return await cursor.fetchall()
 
     async def get_pending_messages(self):
         cursor = await self.db.execute(
-            "SELECT ms.id, ms.lead_id, ms.channel, ms.step, l.phone, l.contact_name, l.company_name "
-            "FROM message_sequences ms JOIN leads l ON ms.lead_id = l.id "
-            "WHERE ms.channel = 'whatsapp' AND ms.sent = 0 "
-            "AND datetime(ms.scheduled_for) <= datetime('now')"
+            "SELECT s.id, s.lead_id, s.channel, s.step, l.phone, l.contact_name, l.company_name "
+            "FROM sequences s JOIN leads l ON s.lead_id = l.id "
+            "WHERE s.channel = 'whatsapp' AND s.sent = 0 "
+            "AND datetime(s.scheduled_for) <= datetime('now')"
         )
         return await cursor.fetchall()
 
     async def mark_email_sent(self, sequence_id: int):
         await self.db.execute(
-            "UPDATE message_sequences SET sent = 1 WHERE id = ?", (sequence_id,)
+            "UPDATE sequences SET sent = 1 WHERE id = ?", (sequence_id,)
         )
         await self.db.commit()
 
     async def mark_message_sent(self, sequence_id: int):
         await self.db.execute(
-            "UPDATE message_sequences SET sent = 1 WHERE id = ?", (sequence_id,)
+            "UPDATE sequences SET sent = 1 WHERE id = ?", (sequence_id,)
         )
         await self.db.commit()
 
@@ -245,7 +243,7 @@ class LeadDatabase:
 
     async def reschedule_sequence(self, lead_id: int, extra_days: int = 5):
         cursor = await self.db.execute(
-            "SELECT step FROM message_sequences "
+            "SELECT step FROM sequences "
             "WHERE lead_id = ? AND channel = 'email' AND sent = 0 ORDER BY step ASC LIMIT 1",
             (lead_id,)
         )
@@ -253,7 +251,7 @@ class LeadDatabase:
         if seq:
             new_time = (datetime.now() + timedelta(days=extra_days)).isoformat()
             await self.db.execute(
-                "UPDATE message_sequences SET scheduled_for = ? "
+                "UPDATE sequences SET scheduled_for = ? "
                 "WHERE lead_id = ? AND channel = 'email' AND sent = 0",
                 (new_time, lead_id)
             )
@@ -261,10 +259,7 @@ class LeadDatabase:
 
     async def stop_all_sequences(self, lead_id: int):
         await self.db.execute(
-            "DELETE FROM email_sequences WHERE lead_id = ? AND sent = 0", (lead_id,)
-        )
-        await self.db.execute(
-            "DELETE FROM message_sequences WHERE lead_id = ? AND sent = 0", (lead_id,)
+            "DELETE FROM sequences WHERE lead_id = ? AND sent = 0", (lead_id,)
         )
         await self.db.commit()
 
@@ -285,19 +280,19 @@ class LeadDatabase:
         return (await cursor.fetchone()) is not None
 
     async def get_open_stats_by_step(self):
-        cursor = await self.db.db.execute(
-            "SELECT ms.step, "
-            "COUNT(DISTINCT ms.id) AS sent, "
+        cursor = await self.db.execute(
+            "SELECT s.step, "
+            "COUNT(DISTINCT s.id) AS sent, "
             "COUNT(DISTINCT eo.sequence_id) AS opened "
-            "FROM message_sequences ms "
-            "LEFT JOIN email_opens eo ON eo.sequence_id = ms.id "
-            "WHERE ms.channel = 'email' AND ms.sent = 1 "
-            "GROUP BY ms.step ORDER BY ms.step"
+            "FROM sequences s "
+            "LEFT JOIN email_opens eo ON eo.sequence_id = s.id "
+            "WHERE s.channel = 'email' AND s.sent = 1 "
+            "GROUP BY s.step ORDER BY s.step"
         )
         return await cursor.fetchall()
 
     async def get_booking_pipeline(self):
-        cursor = await self.db.db.execute(
+        cursor = await self.db.execute(
             "SELECT id, company_name, contact_name, email, phone, status FROM leads "
             "WHERE status IN ('booking_sent', 'qualified') ORDER BY score DESC"
         )

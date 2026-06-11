@@ -2,50 +2,38 @@ import asyncio
 import logging
 import os
 import smtplib
-from contextlib import contextmanager
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from typing import Optional
 
 from src.tracking.tracker import tracking_pixel_html
+from src.utils.validators import validate_email, sanitize_string
 
 logger = logging.getLogger(__name__)
 
 
 class EmailSender:
-    _instance: Optional["EmailSender"] = None
-    _server = None
-
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
-
     def __init__(self):
-        if hasattr(self, '_initialized'):
-            return
         self.smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
         self.smtp_port = int(os.getenv("SMTP_PORT", "587"))
         self.email_address = os.getenv("EMAIL_ADDRESS", "")
         self.email_password = os.getenv("EMAIL_PASSWORD", "")
         self.from_name = os.getenv("FROM_NAME", "Digital Marketing Expert")
-        self._initialized = True
+        self._connection: Optional[smtplib.SMTP] = None
 
     def can_send(self) -> bool:
         return bool(self.email_address and self.email_password)
 
-    async def _connect(self):
-        if self._server is None:
-            self._server = await asyncio.to_thread(self._smtp_connect)
-        return self._server
+    async def _connect(self) -> smtplib.SMTP:
+        if self._connection is None:
+            self._connection = await asyncio.to_thread(self._smtp_connect)
+        return self._connection
 
     async def _disconnect(self):
-        if self._server:
+        if self._connection:
             try:
-                await asyncio.to_thread(self._server.quit)
+                await asyncio.to_thread(self._connection.quit)
             except Exception:
                 pass
-            self._server = None
+            self._connection = None
 
     async def send_email(self, to_email: str, subject: str, body: str,
                          lead_id: Optional[int] = None,
@@ -53,6 +41,14 @@ class EmailSender:
         if not self.can_send():
             logger.warning("Email credentials not configured")
             return False
+
+        if not validate_email(to_email):
+            logger.warning(f"Invalid email address: {to_email}")
+            return False
+
+        to_email = sanitize_string(to_email)
+        subject = sanitize_string(subject, 200)
+        body = sanitize_string(body)
 
         msg = MIMEMultipart("alternative")
         msg["From"] = f"{self.from_name} <{self.email_address}>"
@@ -78,10 +74,10 @@ class EmailSender:
             return True
         except Exception as exc:
             logger.error(f"Failed to send email: {exc}")
-            self._server = None  # Reset on error
+            self._connection = None
             return False
 
-    def _smtp_connect(self):
+    def _smtp_connect(self) -> smtplib.SMTP:
         server = smtplib.SMTP(self.smtp_server, self.smtp_port)
         server.starttls()
         server.login(self.email_address, self.email_password)
@@ -140,7 +136,6 @@ class LeadScorer:
             return "cold"
 
     async def rescore_opened_lead(self, db, lead_id: int):
-        """Recompute score with the open bonus and persist score + category."""
         lead = await db.get_lead_by_id(lead_id)
         if not lead:
             return

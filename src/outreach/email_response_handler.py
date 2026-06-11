@@ -1,10 +1,11 @@
+import hashlib
 import imaplib
 import email
 import asyncio
 import logging
 import os
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any
 
 from src.outreach.email_sender import EmailSender
 
@@ -21,6 +22,7 @@ class EmailResponsePoller:
         self.imap_port = int(os.getenv("IMAP_PORT", "993"))
         self.calendly_link = os.getenv("CALENDLY_LINK", "")
         self.from_name = os.getenv("FROM_NAME", "Digital Marketing Expert")
+        self._processed_messages: set = set()
 
     def can_poll(self) -> bool:
         return bool(self.email_address and self.email_password)
@@ -34,62 +36,68 @@ class EmailResponsePoller:
             leads = await self.db.get_all_leads_with_email()
             count = 0
             
-            M = imaplib.IMAP4_SSL(self.imap_server, self.imap_port)
-            M.login(self.email_address, self.email_password)
-            M.select("inbox")
-            
+            M = await asyncio.to_thread(
+                imaplib.IMAP4_SSL, self.imap_server, self.imap_port
+            )
+            await asyncio.to_thread(M.login, self.email_address, self.email_password)
+            await asyncio.to_thread(M.select, "inbox")
+
             for lead_id, lead_email in leads:
-                # Search for emails from this lead
-                status, messages = M.search(None, f'FROM "{lead_email}"')
-                for msg_id in messages[0].split():
-                    status, msg_data = M.fetch(msg_id, "(RFC822)")
-                    for response_part in msg_data:
-                        if isinstance(response_part, tuple):
-                            msg = email.message_from_bytes(response_part[1])
-                            subject = msg["subject"] or ""
-                            body = self._get_body(msg)
-                            
-                            # Skip if already processed (check by subject/body hash)
-                            existing = await self.db.get_unreplied_responses()
-                            if self._is_duplicate(subject, body, existing):
-                                continue
-                            
-                            # Classify with AI
-                            classification = await self._classify_reply(body)
-                            await self.db.log_email_response(lead_id, subject, body, classification)
-                            
-                            # Handle classification
-                            if classification == "interested":
-                                await self._send_calendly(lead_email, lead_id)
-                                await self.db.update_lead_status(lead_id, "qualified")
-                                count += 1
-                            elif classification == "not_interested":
-                                await self.db.update_lead_status(lead_id, "unsubscribed")
-                                await self.db.stop_all_sequences(lead_id)
-                            elif classification == "out_of_office":
-                                await self.db.reschedule_sequence(lead_id, 5)
-                            elif classification == "question":
-                                await self._send_answer(lead_email, lead_id, body)
-            
-            M.close()
-            M.logout()
+                message_ids = await self._search_messages(M, lead_email)
+                for msg_id in message_ids:
+                    msg_hash = hashlib.md5(f"{msg_id}:{lead_id}".encode()).hexdigest()
+                    if msg_hash in self._processed_messages:
+                        continue
+                    
+                    msg_data = await self._fetch_message(M, msg_id)
+                    if not msg_data:
+                        continue
+                    
+                    subject, body = self._parse_message(msg_data)
+                    classification = await self._classify_reply(body)
+                    await self.db.log_email_response(lead_id, subject, body, classification)
+                    self._processed_messages.add(msg_hash)
+
+                    if classification == "interested":
+                        await self._send_calendly(lead_email, lead_id)
+                        await self.db.update_lead_status(lead_id, "qualified")
+                        count += 1
+                    elif classification == "not_interested":
+                        await self.db.update_lead_status(lead_id, "unsubscribed")
+                        await self.db.stop_all_sequences(lead_id)
+                    elif classification == "out_of_office":
+                        await self.db.reschedule_sequence(lead_id, 5)
+                    elif classification == "question":
+                        await self._send_answer(lead_email, lead_id, body)
+
+            await asyncio.to_thread(M.close)
+            await asyncio.to_thread(M.logout)
             return count
-            
+
         except Exception as exc:
             logger.error(f"IMAP error: {exc}")
             return 0
 
-    async def _classify_reply(self, body: str) -> str:
-        prompt = f"""Classify this email reply as exactly one of: interested, not_interested, question, out_of_office.
-        
-Email body:
-"{body[:500]}"
+    async def _search_messages(self, M, lead_email: str) -> list:
+        status, messages = await asyncio.to_thread(
+            M.search, None, f'FROM "{lead_email}" SINCE "{datetime.now().strftime("%d-%b-%Y")}"'
+        )
+        if status != "OK":
+            return []
+        return messages[0].split()
 
-Respond with only the classification word."""
-        result = await self.ai.generate(prompt, "You are an email classifier.")
-        classification = result.strip().lower().split()[0] if result else "question"
-        valid = {"interested", "not_interested", "question", "out_of_office"}
-        return classification if classification in valid else "question"
+    async def _fetch_message(self, M, msg_id) -> Optional[bytes]:
+        status, msg_data = await asyncio.to_thread(M.fetch, msg_id, "(RFC822)")
+        return msg_data
+
+    def _parse_message(self, msg_data) -> Tuple[str, str]:
+        for response_part in msg_data:
+            if isinstance(response_part, tuple):
+                msg = email.message_from_bytes(response_part[1])
+                subject = msg["subject"] or ""
+                body = self._get_body(msg)
+                return subject, body
+        return "", ""
 
     def _get_body(self, msg) -> str:
         if msg.is_multipart():
@@ -98,9 +106,17 @@ Respond with only the classification word."""
                     return part.get_payload(decode=True).decode("utf-8", errors="ignore")
         return msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-    def _is_duplicate(self, subject: str, body: str, existing) -> bool:
-        content = f"{subject}:{body[:100]}"
-        return any(content in str(r) for r in existing)
+    async def _classify_reply(self, body: str) -> str:
+        prompt = f"""Classify this email reply as exactly one of: interested, not_interested, question, out_of_office.
+
+Email body:
+"{body[:500]}"
+
+Respond with only the classification word."""
+        result = await self.ai.generate(prompt, "You are an email classifier.")
+        classification = result.strip().lower().split()[0] if result else "question"
+        valid = {"interested", "not_interested", "question", "out_of_office"}
+        return classification if classification in valid else "question"
 
     async def _send_calendly(self, to_email: str, lead_id: int):
         sender = EmailSender()
