@@ -31,6 +31,8 @@ Built on `asyncio` for concurrent I/O, with a local SQLite store and pluggable A
 | **Auto-Qualification** | Interested leads receive a Calendly link and are promoted; opt-outs are unsubscribed and removed from sequences |
 | **Daily Summary** | Automated daily WhatsApp report with pipeline stats (new leads, outreach, responses) |
 | **Analytics** | Matplotlib dashboards summarizing pipeline health and outreach activity |
+| **Input Validation** | Email and phone validation, string sanitization to prevent injection attacks |
+| **Rate Limiting** | Built-in rate limiting for API calls and web scraping |
 
 ---
 
@@ -48,17 +50,19 @@ lead-gen-agent/
 │   ├── database.py               # Async SQLite (aiosqlite) data layer
 │   ├── ai_client.py              # Multi-provider LLM client (Groq / Gemini)
 │   ├── analytics.py              # Stats + matplotlib reporting
+│   ├── utils/
+│   │   ├── validators.py         # Input validation and sanitization
+│   │   └── rate_limiter.py       # Rate limiting and retry utilities
 │   ├── scrapers/
 │   │   ├── prospect_scraper.py   # DuckDuckGo / Google search + email extraction
 │   │   └── linkedin_scraper.py   # Playwright LinkedIn / Sales Navigator scraper
 │   ├── outreach/
-│   │   ├── email_sender.py       # SMTP sender (singleton) + lead scorer
+│   │   ├── email_sender.py       # SMTP sender + lead scorer
 │   │   ├── email_generator.py    # AI message generation + sequence scheduler + booking outreach
-│   │   ├── email_response_handler.py  # IMAP polling + AI reply classification
-│   │   └── response_handler.py   # Shared conversation/intent helpers
+│   │   └── email_response_handler.py  # IMAP polling + AI reply classification
 │   ├── tracking/
 │   │   ├── tracker.py            # Email open tracking pixel
-│   │   └── server.py            # aiohttp tracking server
+│   │   └── server.py             # aiohttp tracking server
 │   ├── reports/
 │   │   └── daily_summary.py      # Daily stats aggregation
 │   └── whatsapp_bot.py           # Playwright WhatsApp Web automation
@@ -116,8 +120,14 @@ python main.py
 | `IMAP_SERVER` / `IMAP_PORT` | — | Defaults: `imap.gmail.com` / `993` |
 | `CALENDLY_LINK` | — | Booking link sent to interested leads |
 | `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` | — | LinkedIn login for the scraper (optional) |
+| `LINKEDIN_DATA_DIR` | — | LinkedIn session persistence path |
+| `WHATSAPP_DATA_DIR` | — | WhatsApp session persistence path |
+| `LEAD_DB_PATH` | — | SQLite database path (default: `data/lead_bot.db`) |
+| `TRACKING_BASE_URL` | — | Email open tracking server URL |
 | `OWNER_PHONE` | — | Phone number for daily summary delivery |
 | `AI_MAX_RETRIES` | — | LLM retry attempts (default `3`) |
+| `WHATSAPP_HEADLESS` | — | Set to `true` for headless browser mode |
+| `LINKEDIN_HEADLESS` | — | Set to `true` for headless browser mode |
 
 > \* Required only for the email channel.
 
