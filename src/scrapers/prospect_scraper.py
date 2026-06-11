@@ -2,6 +2,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import urllib.parse
 from dataclasses import dataclass
 from typing import List, Optional
 from urllib.parse import quote_plus
@@ -69,29 +71,52 @@ class GoogleSearchScraper:
         return leads
 
     async def _free_search(self, query: str, max_results: int) -> List[Lead]:
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+            "Accept-Encoding": "gzip, deflate",
+        }
         url = f"https://duckduckgo.com/html/?q={quote_plus(query)}"
         leads = []
         
-        async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT) as session:
-            async with session.get(url, headers=headers) as resp:
-                html = await resp.text()
-                soup = BeautifulSoup(html, "html.parser")
-                for result in soup.select(".result__a")[:max_results]:
-                    link = result.get("href", "")
-                    title = result.get_text(strip=True)
-                    leads.append(Lead(
-                        company_name=self._extract_company_name(title),
-                        contact_name=None,
-                        contact_title=None,
-                        email=None,
-                        phone=None,
-                        website=link if link.startswith("http") else None,
-                        industry=query.split()[0] if query else None,
-                        location=None,
-                        employees=None,
-                        source="duckduckgo",
-                    ))
+        try:
+            async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT) as session:
+                async with session.get(url, headers=headers) as resp:
+                    html = await resp.text()
+                    soup = BeautifulSoup(html, "html.parser")
+                    result_bodies = soup.select(".result__body")
+                    logger.info(f"Found {len(result_bodies)} result bodies")
+                    
+                    for body in result_bodies[:max_results]:
+                        link = ""
+                        for a in body.select("a"):
+                            href = a.get("href", "")
+                            if href and "duckduckgo.com/l/?uddg=" in href:
+                                decoded = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
+                                if decoded.startswith("http"):
+                                    link = decoded
+                                    break
+                        
+                        title_elem = body.select_one(".result__title")
+                        title = title_elem.get_text(strip=True) if title_elem else ""
+                        
+                        if link and title:
+                            leads.append(Lead(
+                                company_name=self._extract_company_name(title),
+                                contact_name=None,
+                                contact_title=None,
+                                email=None,
+                                phone=None,
+                                website=link,
+                                industry=query.split()[0] if query else None,
+                                location=None,
+                                employees=None,
+                                source="duckduckgo",
+                            ))
+        except Exception as exc:
+            logger.warning(f"DuckDuckGo search failed: {exc}. Try setting GOOGLE_API_KEY for better results.")
+        
         return await self._enrich_leads(leads)
 
     async def _enrich_leads(self, leads: List[Lead]) -> List[Lead]:
@@ -111,8 +136,6 @@ class GoogleSearchScraper:
 class EmailExtractor:
     async def find_email(self, website: str, company: str) -> Optional[str]:
         headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-        import re
-        
         try:
             async with aiohttp.ClientSession(timeout=DEFAULT_TIMEOUT) as session:
                 contact_url = f"{website.rstrip('/')}/contact"
@@ -139,15 +162,17 @@ class LeadScraper:
         
         for niche in niches:
             for location in locations:
-                query = f"{niche} companies {location} 'digital marketing'"
+                query = f"{niche} companies in {location} digital marketing"
                 leads = await self.google_scraper.search_prospects(query, 10)
+                if not leads:
+                    logger.warning(f"No leads found for '{query}' - DuckDuckGo may be blocking the request")
                 for lead in leads:
                     lead.industry = niche
                     lead.location = location
                     if lead.website and not lead.email:
                         lead.email = await self.email_extractor.find_email(lead.website, lead.company_name)
                     all_leads.append(lead)
-                await asyncio.sleep(2)
+                await asyncio.sleep(3)
         
         return list({lead.website: lead for lead in all_leads if lead.website}.values())
 
