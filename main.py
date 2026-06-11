@@ -29,9 +29,10 @@ from src.outreach.email_response_handler import EmailResponsePoller
 from src.whatsapp_bot import WhatsAppBot
 from src.analytics import Analytics
 from src.tracking.server import TrackingServer, get_tracking_port
+from src.reports.daily_summary import DailySummary
 
 
-async def run_prospecting(db, scraper, scorer, outbound):
+async def run_prospecting(db, scraper, scorer, outbound, whatsapp=None):
     profile_path = Path(__file__).parent / "config" / "agency_profile.json"
     with open(profile_path, encoding="utf-8") as f:
         profile = json.load(f)
@@ -60,12 +61,21 @@ async def run_prospecting(db, scraper, scorer, outbound):
         lead_dict["score"] = score
         
         lead_id = await db.add_lead(lead_dict)
+        lead_dict["id"] = lead_id
         await db.update_lead_status(lead_id, category)
         
-        if lead.email:
-            await outbound.schedule_sequence(lead_id, "email")
-        if lead.phone:
-            await outbound.schedule_sequence(lead_id, "whatsapp")
+        if category == "hot":
+            if lead.email:
+                await outbound.send_booking_outreach(lead_dict, "email")
+                logger.info(f"Booking outreach sent to hot lead: {lead.company_name}")
+            if lead.phone:
+                await outbound.send_booking_outreach(lead_dict, "whatsapp")
+                logger.info(f"Booking outreach sent to hot lead via WhatsApp: {lead.company_name}")
+        else:
+            if lead.email:
+                await outbound.schedule_sequence(lead_id, "email")
+            if lead.phone:
+                await outbound.schedule_sequence(lead_id, "whatsapp")
         
         logger.info(f"Added lead: {lead.company_name} (Score: {score}, Category: {category})")
     
@@ -98,7 +108,6 @@ async def check_email_responses(poller):
 
 
 async def run_linkedin_prospecting(db, scraper, scorer, linkedin_scraper, outbound):
-    """Run LinkedIn Sales Navigator prospecting and save leads."""
     profile_path = Path(__file__).parent / "config" / "agency_profile.json"
     with open(profile_path, encoding="utf-8") as f:
         profile = json.load(f)
@@ -158,6 +167,22 @@ async def check_whatsapp_responses(whatsapp):
         print(f" - WhatsApp {r[1]}: {r[3]} ({r[2][:50] if r[2] else 'no body'})")
 
 
+async def view_booking_pipeline(db):
+    leads = await db.get_booking_pipeline()
+    if not leads:
+        print("No leads in booking pipeline yet.")
+        return
+    
+    print("\nBooking Pipeline:")
+    for lead in leads[:10]:
+        lead_id, company, contact, email, phone, status = lead[0], lead[1], lead[2], lead[3], lead[4], lead[5]
+        print(f" - {company} ({contact or 'unknown'}) [{status}]")
+        if email:
+            print(f"   Email: {email}")
+        if phone:
+            print(f"   Phone: {phone}")
+
+
 async def show_open_stats(db):
     rows = await db.get_open_stats_by_step()
     if not rows:
@@ -170,6 +195,87 @@ async def show_open_stats(db):
         print(f"{step:<6}{sent:<8}{opened:<8}{rate:<10}")
 
 
+async def send_daily_summary(db, whatsapp):
+    summary = DailySummary(db, whatsapp if whatsapp.page else None)
+    sent = await summary.run_and_send()
+    if sent:
+        print("Daily summary sent to owner via WhatsApp")
+    else:
+        print("Failed to send daily summary (check OWNER_PHONE and WhatsApp connection)")
+
+
+async def schedule_daily_summary(db, whatsapp):
+    while True:
+        now = datetime.now()
+        target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+        if now >= target:
+            target = target.replace(day=target.day + 1)
+        wait_seconds = (target - now).total_seconds()
+        await asyncio.sleep(wait_seconds)
+        await send_daily_summary(db, whatsapp)
+
+
+def build_components(db):
+    """Construct the shared service objects used by both interactive and CLI modes."""
+    ai = AIClient()
+    whatsapp = WhatsAppBot()
+    whatsapp.db = db
+    whatsapp.ai = ai
+    msg_gen = MessageGenerator(ai)
+    return {
+        "ai": ai,
+        "scraper": LeadScraper(),
+        "scorer": LeadScorer(),
+        "msg_gen": msg_gen,
+        "whatsapp": whatsapp,
+        "analytics": Analytics(db),
+        "outbound": OutreachSequence(db, msg_gen, whatsapp),
+        "email_poller": EmailResponsePoller(db, ai),
+        "linkedin_scraper": LinkedInScraper(),
+    }
+
+
+async def run_once(mode: str):
+    """Run a single action and exit — for cron / Task Scheduler automation."""
+    db = LeadDatabase()
+    await db.connect()
+    logger.info(f"Database connected (run-once mode: {mode})")
+
+    tracking_server = TrackingServer(db, port=get_tracking_port())
+    await tracking_server.start()
+
+    c = build_components(db)
+    try:
+        if mode == "prospect":
+            count = await run_prospecting(db, c["scraper"], c["scorer"], c["outbound"], c["whatsapp"])
+            print(f"Found {count} prospects")
+        elif mode == "linkedin":
+            count = await run_linkedin_prospecting(
+                db, c["scraper"], c["scorer"], c["linkedin_scraper"], c["outbound"]
+            )
+            print(f"Found {count} LinkedIn leads")
+        elif mode == "outreach":
+            sent = await run_outreach(db, c["outbound"], "email")
+            print(f"Sent {sent} emails")
+        elif mode == "whatsapp":
+            sent = await run_outreach(db, c["outbound"], "whatsapp")
+            print(f"Sent {sent} WhatsApp messages")
+        elif mode == "responses":
+            await check_email_responses(c["email_poller"])
+        elif mode == "report":
+            chart, stats = await c["analytics"].generate_daily_report()
+            print(f"Report saved: {chart}")
+            print(f"Stats: {stats}")
+        else:
+            print(f"Unknown mode: {mode}")
+    except Exception as exc:
+        logger.error(f"run-once ({mode}) failed: {exc}")
+        print(f"Error: {exc}")
+    finally:
+        await tracking_server.stop()
+        await db.close()
+
+
 async def main_loop():
     db = LeadDatabase()
     await db.connect()
@@ -177,20 +283,21 @@ async def main_loop():
 
     tracking_server = TrackingServer(db, port=get_tracking_port())
     await tracking_server.start()
-    
-    ai = AIClient()
-    scraper = LeadScraper()
-    scorer = LeadScorer()
-    msg_gen = MessageGenerator(ai)
-    whatsapp = WhatsAppBot()
-    whatsapp.db = db
-    whatsapp.ai = ai
-    analytics = Analytics(db)
-    outbound = OutreachSequence(db, msg_gen, whatsapp)
-    email_poller = EmailResponsePoller(db, ai)
-    linkedin_scraper = LinkedInScraper()
-    
+
+    c = build_components(db)
+    ai = c["ai"]
+    scraper = c["scraper"]
+    scorer = c["scorer"]
+    msg_gen = c["msg_gen"]
+    whatsapp = c["whatsapp"]
+    analytics = c["analytics"]
+    outbound = c["outbound"]
+    email_poller = c["email_poller"]
+    linkedin_scraper = c["linkedin_scraper"]
+
     show_whatsapp_menu = False
+    
+    asyncio.create_task(schedule_daily_summary(db, whatsapp))
     
     while True:
         print("\n=== Lead Gen Agent Menu ===")
@@ -206,13 +313,15 @@ async def main_loop():
         print("9. Check WhatsApp responses")
         print("10. Run LinkedIn prospecting")
         print("11. View email open stats")
-        print("12. Exit")
+        print("12. Send daily summary now")
+        print("13. View booking pipeline")
+        print("14. Exit")
         
         choice = input("Select option: ").strip()
         
         try:
             if choice == "1":
-                count = await run_prospecting(db, scraper, scorer, outbound)
+                count = await run_prospecting(db, scraper, scorer, outbound, whatsapp)
                 print(f"Found {count} prospects")
             
             elif choice == "2":
@@ -255,18 +364,24 @@ async def main_loop():
             
             elif choice == "8":
                 await check_email_responses(email_poller)
-
+            
             elif choice == "9":
                 await check_whatsapp_responses(whatsapp)
-
+            
             elif choice == "10":
                 count = await run_linkedin_prospecting(db, scraper, scorer, linkedin_scraper, outbound)
                 print(f"Found {count} LinkedIn leads")
-
+            
             elif choice == "11":
                 await show_open_stats(db)
-
+            
             elif choice == "12":
+                await send_daily_summary(db, whatsapp)
+            
+            elif choice == "13":
+                await view_booking_pipeline(db)
+            
+            elif choice == "14":
                 await tracking_server.stop()
                 await db.close()
                 break
@@ -275,5 +390,31 @@ async def main_loop():
             print(f"Error: {exc}")
 
 
+def parse_args(argv=None):
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Lead Generation Agent. With no flags, launches the interactive menu. "
+                    "A single mode flag runs that action once and exits (for cron / Task Scheduler)."
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument("--prospect", action="store_const", const="prospect", dest="mode",
+                       help="Run DuckDuckGo/Google prospecting once and exit")
+    group.add_argument("--linkedin", action="store_const", const="linkedin", dest="mode",
+                       help="Run LinkedIn prospecting once and exit")
+    group.add_argument("--outreach", action="store_const", const="outreach", dest="mode",
+                       help="Send pending email outreach once and exit")
+    group.add_argument("--whatsapp", action="store_const", const="whatsapp", dest="mode",
+                       help="Send pending WhatsApp outreach once and exit")
+    group.add_argument("--responses", action="store_const", const="responses", dest="mode",
+                       help="Check & classify email replies once and exit")
+    group.add_argument("--report", action="store_const", const="report", dest="mode",
+                       help="Generate the analytics report once and exit")
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    asyncio.run(main_loop())
+    args = parse_args()
+    if args.mode:
+        asyncio.run(run_once(args.mode))
+    else:
+        asyncio.run(main_loop())

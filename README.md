@@ -26,8 +26,10 @@ Built on `asyncio` for concurrent I/O, with a local SQLite store and pluggable A
 | **Prospect Discovery** | DuckDuckGo HTML scraping (no API key) + optional Google Custom Search and LinkedIn/Sales Navigator scraping via Playwright |
 | **Lead Scoring** | Weighted scoring on industry, company size, location, and contactability → Hot / Warm / Cold tiers |
 | **AI Outreach Sequences** | 3-step nurture cadences for email and WhatsApp, with personalized copy generated per lead |
+| **Hot Leads Booking** | Immediate Calendly link delivery for hot leads, bypassing nurture sequences |
 | **Reply Intelligence** | IMAP + WhatsApp polling with AI classification (interested / question / not interested / out-of-office) and automated responses |
 | **Auto-Qualification** | Interested leads receive a Calendly link and are promoted; opt-outs are unsubscribed and removed from sequences |
+| **Daily Summary** | Automated daily WhatsApp report with pipeline stats (new leads, outreach, responses) |
 | **Analytics** | Matplotlib dashboards summarizing pipeline health and outreach activity |
 
 ---
@@ -51,9 +53,14 @@ lead-gen-agent/
 │   │   └── linkedin_scraper.py   # Playwright LinkedIn / Sales Navigator scraper
 │   ├── outreach/
 │   │   ├── email_sender.py       # SMTP sender (singleton) + lead scorer
-│   │   ├── email_generator.py    # AI message generation + sequence scheduler
+│   │   ├── email_generator.py    # AI message generation + sequence scheduler + booking outreach
 │   │   ├── email_response_handler.py  # IMAP polling + AI reply classification
 │   │   └── response_handler.py   # Shared conversation/intent helpers
+│   ├── tracking/
+│   │   ├── tracker.py            # Email open tracking pixel
+│   │   └── server.py            # aiohttp tracking server
+│   ├── reports/
+│   │   └── daily_summary.py      # Daily stats aggregation
 │   └── whatsapp_bot.py           # Playwright WhatsApp Web automation
 └── data/                         # SQLite DB + browser sessions (gitignored)
 ```
@@ -109,6 +116,7 @@ python main.py
 | `IMAP_SERVER` / `IMAP_PORT` | — | Defaults: `imap.gmail.com` / `993` |
 | `CALENDLY_LINK` | — | Booking link sent to interested leads |
 | `LINKEDIN_EMAIL` / `LINKEDIN_PASSWORD` | — | LinkedIn login for the scraper (optional) |
+| `OWNER_PHONE` | — | Phone number for daily summary delivery |
 | `AI_MAX_RETRIES` | — | LLM retry attempts (default `3`) |
 
 > \* Required only for the email channel.
@@ -135,7 +143,10 @@ Run `python main.py` and choose from the interactive menu:
 | `8` | Check & classify email replies |
 | `9` | Check & classify WhatsApp replies |
 | `10` | Run LinkedIn prospecting |
-| `11` | Exit |
+| `11` | View email open stats |
+| `12` | Send daily summary now |
+| `13` | View booking pipeline |
+| `14` | Exit |
 
 ### WhatsApp Setup
 
@@ -149,6 +160,8 @@ On first use, select **option 7**. A browser opens to WhatsApp Web — scan the 
 
 - **Email:** immediate → +48h → +96h
 - **WhatsApp:** immediate → +24h → +72h
+
+**Hot leads** (score ≥ 60) receive immediate Calendly booking outreach instead of waiting for sequences.
 
 **Lead scoring** awards points for high-value industries, company size, target geography, and a discoverable email, then buckets leads into:
 

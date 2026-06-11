@@ -25,6 +25,9 @@ class Analytics:
         cursor = await self.db.db.execute("SELECT COUNT(*) FROM leads WHERE status = 'qualified'")
         stats["qualified_leads"] = (await cursor.fetchone())[0]
         
+        cursor = await self.db.db.execute("SELECT COUNT(*) FROM leads WHERE status = 'booking_sent'")
+        stats["booking_sent_leads"] = (await cursor.fetchone())[0]
+        
         cursor = await self.db.db.execute("SELECT COUNT(*) FROM outreach WHERE channel = 'email'")
         stats["emails_sent"] = (await cursor.fetchone())[0]
         
@@ -38,14 +41,23 @@ class Analytics:
 
     async def generate_daily_report(self):
         stats = await self.get_stats()
-        
+
         fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-        
-        axes[0].pie(
-            [stats.get("hot_leads", 0), stats.get("qualified_leads", 0), stats.get("total_leads", 0) - stats.get("hot_leads", 0) - stats.get("qualified_leads", 0)],
-            labels=["Hot Leads", "Qualified", "Other"],
-            autopct="%1.1f%%",
-        )
+
+        hot = stats.get("hot_leads", 0)
+        qualified = stats.get("qualified_leads", 0)
+        other = stats.get("total_leads", 0) - hot - qualified
+        pie_values = [max(0, hot), max(0, qualified), max(0, other)]
+        if sum(pie_values) == 0:
+            # matplotlib divides by the total, producing NaN on an all-zero pie
+            axes[0].text(0.5, 0.5, "No leads yet", ha="center", va="center")
+            axes[0].axis("off")
+        else:
+            axes[0].pie(
+                pie_values,
+                labels=["Hot Leads", "Qualified", "Other"],
+                autopct="%1.1f%%",
+            )
         axes[0].set_title("Lead Distribution")
         
         axes[1].bar(

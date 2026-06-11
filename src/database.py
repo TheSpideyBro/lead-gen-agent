@@ -285,7 +285,7 @@ class LeadDatabase:
         return (await cursor.fetchone()) is not None
 
     async def get_open_stats_by_step(self):
-        cursor = await self.db.execute(
+        cursor = await self.db.db.execute(
             "SELECT ms.step, "
             "COUNT(DISTINCT ms.id) AS sent, "
             "COUNT(DISTINCT eo.sequence_id) AS opened "
@@ -293,5 +293,12 @@ class LeadDatabase:
             "LEFT JOIN email_opens eo ON eo.sequence_id = ms.id "
             "WHERE ms.channel = 'email' AND ms.sent = 1 "
             "GROUP BY ms.step ORDER BY ms.step"
+        )
+        return await cursor.fetchall()
+
+    async def get_booking_pipeline(self):
+        cursor = await self.db.db.execute(
+            "SELECT id, company_name, contact_name, email, phone, status FROM leads "
+            "WHERE status IN ('booking_sent', 'qualified') ORDER BY score DESC"
         )
         return await cursor.fetchall()

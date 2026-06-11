@@ -157,3 +157,64 @@ class OutreachSequence:
                 sent_count += 1
                 await asyncio.sleep(2)  # Rate limit
         return sent_count
+
+    async def send_booking_outreach(self, lead: dict, channel: str = "email"):
+        import os
+        calendly_link = os.getenv("CALENDLY_LINK", "")
+        
+        if not calendly_link:
+            logger.warning("CALENDLY_LINK not configured")
+            return False
+        
+        lead_id = lead.get("id")
+        
+        if channel == "email":
+            subject = f"Quick 15-min call — {lead.get('company_name', 'your company')}?"
+            body = await self._generate_booking_email(lead, calendly_link)
+            sender = EmailSender()
+            success = await sender.send_email(
+                lead.get("email"), subject, body, lead_id=lead_id, sequence_id=None
+            )
+            if success:
+                await self.db.log_outreach(lead_id, "booking", subject, body)
+                await self.db.update_lead_status(lead_id, "booking_sent")
+            return success
+        elif channel == "whatsapp":
+            body = await self._generate_booking_whatsapp(lead, calendly_link)
+            if self.whatsapp and self.whatsapp.page:
+                phone = lead.get("phone", "")
+                if phone:
+                    await self.whatsapp.send_message(phone, body)
+                    await self.db.log_outreach(lead_id, "booking", "", body)
+                    await self.db.update_lead_status(lead_id, "booking_sent")
+                    return True
+        return False
+
+    async def _generate_booking_email(self, lead: dict, calendly_link: str) -> str:
+        system_prompt = f"You are {self.msg_gen.profile.get('your_name', 'a sales rep')} from {self.msg_gen.profile.get('agency_name', 'a digital marketing agency')}."
+        user_prompt = f"""Write a short booking email to {lead.get('contact_name', 'them')} at {lead.get('company_name')}.
+        
+        They're a hot lead. Offer a 15-min call to discuss growth opportunities.
+        
+        Include:
+        - Brief personalized hook
+        - Value: {', '.join(self.msg_gen.profile.get('services', [])[:2])}
+        - Calendly link: {calendly_link}
+        
+        Sign off professionally."""
+        body = await self.msg_gen.ai.generate(user_prompt, system_prompt)
+        signature = self.msg_gen.profile.get('email_signature', '').format(
+            email=self.msg_gen.profile.get('your_email', ''),
+            phone=self.msg_gen.profile.get('your_phone', '')
+        )
+        return f"{body}\n\n{signature}"
+
+    async def _generate_booking_whatsapp(self, lead: dict, calendly_link: str) -> str:
+        system_prompt = f"You are {self.msg_gen.profile.get('your_name', 'a sales rep')}."
+        user_prompt = f"""Generate WhatsApp booking message (UNDER 100 WORDS) to {lead.get('contact_name', 'them')} at {lead.get('company_name')}.
+        
+        Hot lead - send Calendly link for quick call:
+        {calendly_link}
+        
+        Be direct, friendly, under 100 words."""
+        return await self.msg_gen.ai.generate(user_prompt, system_prompt)
