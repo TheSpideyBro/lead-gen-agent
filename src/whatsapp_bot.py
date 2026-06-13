@@ -165,18 +165,18 @@ Keep under 100 words."""
         return "Thanks for your message! I'll follow up soon."
 
     async def _get_lead_id_by_phone(self, phone: str) -> Optional[int]:
-        cursor = await self.db.execute(
+        cursor = await self.db.db.execute(
             "SELECT id FROM leads WHERE phone = ? LIMIT 1", (phone,)
         )
         row = await cursor.fetchone()
         return row[0] if row else None
 
     async def _store_whatsapp_response(self, lead_id, phone, body, classification):
-        await self.db.execute(
+        await self.db.db.execute(
             "INSERT INTO whatsapp_responses (lead_id, phone, body, classification) VALUES (?, ?, ?, ?)",
             (lead_id, phone, body, classification)
         )
-        await self.db.commit()
+        await self.db.db.commit()
 
     async def close(self):
         if self.browser:

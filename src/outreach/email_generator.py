@@ -1,8 +1,10 @@
+import asyncio
 import json
 import logging
 from datetime import datetime, timedelta
 from typing import Dict, List
 from src.ai_client import AIClient
+from src.outreach.email_sender import EmailSender
 
 logger = logging.getLogger(__name__)
 
