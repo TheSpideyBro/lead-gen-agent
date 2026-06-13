@@ -1,0 +1,35 @@
+{
+  "_comment": "Global WhatsApp outreach templates. The AI selects a template by step + lead industry and fills {{variables}}. For the 360dialog API, template NAMES must also be pre-approved in your WhatsApp Business account; the body here is the approved copy.",
+  "templates": [
+    {
+      "name": "cold_intro",
+      "body": "Hi {{first_name}}, I help {{industry}} companies like {{company}} grow with performance marketing. Saw what you're building — would a quick idea be useful?",
+      "variables": ["first_name", "industry", "company"],
+      "best_for_industries": ["SaaS", "E-commerce", "FinTech", "MarTech"]
+    },
+    {
+      "name": "followup_1",
+      "body": "Hi {{first_name}}, following up on my last note. One quick win for {{company}}: {{value_point}}. Worth a short chat?",
+      "variables": ["first_name", "company", "value_point"],
+      "best_for_industries": ["SaaS", "EdTech", "HealthTech", "PropTech"]
+    },
+    {
+      "name": "followup_2",
+      "body": "Hi {{first_name}}, we helped a similar {{industry}} company {{case_study_result}}. Happy to share how — interested?",
+      "variables": ["first_name", "industry", "case_study_result"],
+      "best_for_industries": ["E-commerce", "FinTech", "LegalTech", "HR Tech"]
+    },
+    {
+      "name": "booking_request",
+      "body": "Hi {{first_name}}, would love 15 minutes to walk through ideas for {{company}}. Grab a slot here: {{calendly_link}}",
+      "variables": ["first_name", "company", "calendly_link"],
+      "best_for_industries": ["SaaS", "E-commerce", "FinTech", "EdTech", "HealthTech", "MarTech", "PropTech", "LegalTech", "HR Tech", "AgriTech"]
+    },
+    {
+      "name": "breakup_message",
+      "body": "Hi {{first_name}}, I don't want to crowd your inbox — I'll close the loop here. If growth at {{company}} becomes a priority, just reply and I'm around. All the best!",
+      "variables": ["first_name", "company"],
+      "best_for_industries": ["SaaS", "E-commerce", "FinTech", "EdTech", "HealthTech", "MarTech", "PropTech", "LegalTech", "HR Tech", "AgriTech"]
+    }
+  ]
+}
