@@ -6,6 +6,7 @@ from typing import Dict, List
 from src.ai_client import AIClient
 from src.outreach.email_sender import EmailSender
 from src.scheduling.timezone_scheduler import TimezoneScheduler
+from src.language.lang_handler import LangHandler
 
 logger = logging.getLogger(__name__)
 
@@ -129,6 +130,7 @@ class OutreachSequence:
         self.msg_gen = message_gen
         self.whatsapp = whatsapp_bot
         self.scheduler = TimezoneScheduler()
+        self.lang = LangHandler(getattr(message_gen, "ai", None))
 
     async def schedule_sequence(self, lead_id: int, channel: str = "email"):
         """Schedule each step in the RECIPIENT's local optimal window.
@@ -155,6 +157,10 @@ class OutreachSequence:
                 subject, body = await self.msg_gen.generate_initial_message(lead, "email")
             else:
                 subject, body = await self.msg_gen.generate_followup(lead, step, "email")
+            # Localize subject + body to the recipient's language (Section 5).
+            country = (lead or {}).get("country") or (lead or {}).get("location")
+            subject, _ = await self.lang.localize(subject, country)
+            body, _ = await self.lang.localize(body, country)
             await sender.send_email(email, subject, body, lead_id=lead_id, sequence_id=seq_id)
             await self.db.log_outreach(lead_id, "email", subject, body)
             await self.db.mark_email_sent(seq_id)
@@ -172,6 +178,9 @@ class OutreachSequence:
                     _, body = await self.msg_gen.generate_initial_message(lead, "whatsapp")
                 else:
                     _, body = await self.msg_gen.generate_followup(lead, step, "whatsapp")
+                # Localize WhatsApp body to recipient's language (Section 5).
+                country = (lead or {}).get("country") or (lead or {}).get("location")
+                body, _ = await self.lang.localize(body, country)
                 if self.whatsapp:
                     await self.whatsapp.send_message(phone, body)
                 await self.db.log_outreach(lead_id, "whatsapp", "", body)
