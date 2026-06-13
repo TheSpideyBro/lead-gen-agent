@@ -1,0 +1,11 @@
+{
+  "industries": ["SaaS", "E-commerce", "FinTech", "EdTech", "HealthTech",
+                 "MarTech", "PropTech", "LegalTech", "HR Tech", "AgriTech"],
+  "company_size": {"min_employees": 5, "max_employees": 500},
+  "funding_stages": ["Seed", "Series A", "Series B", "Bootstrapped"],
+  "exclude_countries": [],
+  "target_titles": ["CEO", "Founder", "Co-Founder", "CMO", "Head of Marketing",
+                    "VP Marketing", "Growth Lead", "Marketing Director"],
+  "exclude_titles": ["Intern", "Student", "Freelancer"],
+  "min_score_to_contact": 40
+}
