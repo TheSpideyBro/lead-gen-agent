@@ -4,6 +4,9 @@
   "your_email": "saddamhossainakash1100@gmail.com",
   "your_phone": "+8801859892181",
   "your_location": "Bangladesh (Remote Worldwide)",
+  "your_address": "REPLACE WITH YOUR PHYSICAL MAILING ADDRESS (required by CAN-SPAM/GDPR)",
+  "target_regions": ["US", "GB", "CA", "AU", "DE", "AE", "SG", "IN"],
+  "excluded_regions": [],
   "services": [
     "SEO & Local SEO",
     "Google Ads (PPC)",

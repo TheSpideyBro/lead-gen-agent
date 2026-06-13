@@ -30,18 +30,59 @@ from src.whatsapp_bot import WhatsAppBot
 from src.analytics import Analytics
 from src.tracking.server import TrackingServer, get_tracking_port
 from src.reports.daily_summary import DailySummary
+from src.scoring.icp_scorer import ICPScorer
+from src.scheduling.timezone_scheduler import TimezoneScheduler
+from src.language.lang_handler import LangHandler
+from src.utils.api_usage import APIUsageTracker
+from src.db.migrate import migrate
 
 
-async def run_prospecting(db, scraper, scorer, outbound, whatsapp=None):
-    profile_path = Path(__file__).parent / "config" / "agency_profile.json"
-    with open(profile_path, encoding="utf-8") as f:
-        profile = json.load(f)
-    
-    industries = profile.get("target_client_profile", {}).get("industries", [])
-    locations = profile.get("target_client_profile", {}).get("geographic_focus", [])
-    
-    leads = await scraper.find_prospects(industries, locations)
-    
+def load_global_targeting() -> dict:
+    path = Path(__file__).parent / "config" / "global_targeting.json"
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+
+def global_status_lines(usage: APIUsageTracker) -> list:
+    """Lines for the GLOBAL MODE banner: active sources + today's API usage."""
+    lines = ["", "🌍 GLOBAL MODE — firmographic, multi-source, worldwide", "Active lead sources:"]
+    lines.append(f"  Apollo      : {'ON' if os.getenv('APOLLO_API_KEY') else 'off (set APOLLO_API_KEY)'}")
+    lines.append(f"  GitHub      : {'ON (token)' if os.getenv('GITHUB_TOKEN') else 'ON (anon, 60/hr)'}")
+    lines.append(f"  ProductHunt : {'ON' if os.getenv('PRODUCTHUNT_TOKEN') else 'off (set PRODUCTHUNT_TOKEN)'}")
+    lines.append("  Google/DDG  : fallback")
+    lines.append(f"WhatsApp provider: {os.getenv('WHATSAPP_PROVIDER', 'web')}  |  "
+                 f"Language: {os.getenv('OUTREACH_LANGUAGE', 'auto')}  |  "
+                 f"GDPR mode: {os.getenv('GDPR_MODE', 'false')}")
+    lines.append("Today's API usage (used/limit):")
+    for source, info in usage.snapshot().items():
+        flag = "  ⚠" if info["limit"] and info["used"] >= 0.8 * info["limit"] else ""
+        lines.append(f"  {source:<14}{info['used']}/{info['limit']}{flag}")
+    return lines
+
+
+async def run_prospecting(db, c):
+    """GLOBAL prospecting: fan out to all configured sources, ICP-score, enrich
+    (timezone/language/region), and auto-contact only Tier 1/2 leads."""
+    scraper, scorer, outbound = c["scraper"], c["scorer"], c["outbound"]
+    icp, tz, lang = c["icp"], c["tz"], c["lang"]
+
+    targeting = load_global_targeting()
+    leads = await scraper.find_global_prospects(targeting)
+
+    # Fallback to the legacy location-based search if no global source returned.
+    if not leads:
+        logger.info("No global-source leads (keys unset?) — falling back to Google/DDG")
+        profile_path = Path(__file__).parent / "config" / "agency_profile.json"
+        with open(profile_path, encoding="utf-8") as f:
+            profile = json.load(f)
+        industries = profile.get("target_client_profile", {}).get("industries", [])
+        locations = profile.get("target_client_profile", {}).get("geographic_focus", [])
+        leads = await scraper.find_prospects(industries, locations)
+
+    min_score = targeting.get("min_score_to_contact", 40)
     for lead in leads:
         lead_dict = {
             "company_name": lead.company_name,
@@ -51,34 +92,54 @@ async def run_prospecting(db, scraper, scorer, outbound, whatsapp=None):
             "phone": lead.phone,
             "website": lead.website,
             "industry": lead.industry,
-            "location": lead.location,
+            "location": lead.location or lead.country,
             "employees": lead.employees,
             "source": lead.source,
         }
-        
-        score = scorer.score_lead(lead_dict)
-        category = scorer.categorize_lead(score)
-        lead_dict["score"] = score
-        
+        legacy_score = scorer.score_lead(lead_dict)
+        lead_dict["score"] = legacy_score
+
         lead_id = await db.add_lead(lead_dict)
         lead_dict["id"] = lead_id
+        category = scorer.categorize_lead(legacy_score)
         await db.update_lead_status(lead_id, category)
-        
+
+        # ICP scoring + enrichment (tech detection off for bulk speed/safety).
+        icp_input = {**lead_dict, "linkedin_url": lead.linkedin_url,
+                     "funding_stage": lead.funding_stage, "signals": lead.signals}
+        icp_score = await icp.score_lead(icp_input, detect_tech=False)
+        tier = icp.get_icp_tier(icp_score)
+        country = lead.country or lead.location
+        country_code = tz.country_to_code(country)
+        await db.update_lead_global(
+            lead_id,
+            icp_score=icp_score,
+            icp_tier=tier,
+            detected_timezone=tz.detect_timezone(country),
+            detected_language=lang.language_for_country(country),
+            region=outbound.compliance.region_for_country(country_code),
+            funding_stage=lead.funding_stage,
+        )
+
+        # Only auto-contact Tier 1/2 leads above the min score (Section 2).
+        if not icp.should_auto_contact(tier) or icp_score < min_score:
+            logger.info("Lead %s — %s (ICP %d) not auto-contacted",
+                        lead.company_name, tier, icp_score)
+            continue
+
         if category == "hot":
             if lead.email:
                 await outbound.send_booking_outreach(lead_dict, "email")
-                logger.info(f"Booking outreach sent to hot lead: {lead.company_name}")
             if lead.phone:
                 await outbound.send_booking_outreach(lead_dict, "whatsapp")
-                logger.info(f"Booking outreach sent to hot lead via WhatsApp: {lead.company_name}")
         else:
             if lead.email:
                 await outbound.schedule_sequence(lead_id, "email")
             if lead.phone:
                 await outbound.schedule_sequence(lead_id, "whatsapp")
-        
-        logger.info(f"Added lead: {lead.company_name} (Score: {score}, Category: {category})")
-    
+        logger.info("Added lead: %s (%s, ICP %d, %s)",
+                    lead.company_name, category, icp_score, tier)
+
     return len(leads)
 
 
@@ -232,6 +293,11 @@ def build_components(db):
         "outbound": OutreachSequence(db, msg_gen, whatsapp),
         "email_poller": EmailResponsePoller(db, ai),
         "linkedin_scraper": LinkedInScraper(),
+        # GLOBAL services
+        "icp": ICPScorer(),
+        "tz": TimezoneScheduler(),
+        "lang": LangHandler(ai),
+        "usage": APIUsageTracker(),
     }
 
 
@@ -239,6 +305,7 @@ async def run_once(mode: str):
     """Run a single action and exit — for cron / Task Scheduler automation."""
     db = LeadDatabase()
     await db.connect()
+    await migrate()  # ensure global columns exist
     logger.info(f"Database connected (run-once mode: {mode})")
 
     tracking_server = TrackingServer(db, port=get_tracking_port())
@@ -247,7 +314,7 @@ async def run_once(mode: str):
     c = build_components(db)
     try:
         if mode == "prospect":
-            count = await run_prospecting(db, c["scraper"], c["scorer"], c["outbound"], c["whatsapp"])
+            count = await run_prospecting(db, c)
             print(f"Found {count} prospects")
         elif mode == "linkedin":
             count = await run_linkedin_prospecting(
@@ -279,6 +346,7 @@ async def run_once(mode: str):
 async def main_loop():
     db = LeadDatabase()
     await db.connect()
+    await migrate()  # ensure global columns exist
     logger.info("Database connected")
 
     tracking_server = TrackingServer(db, port=get_tracking_port())
@@ -298,9 +366,12 @@ async def main_loop():
     show_whatsapp_menu = False
     
     asyncio.create_task(schedule_daily_summary(db, whatsapp))
-    
+
+    for line in global_status_lines(c["usage"]):
+        print(line)
+
     while True:
-        print("\n=== Lead Gen Agent Menu ===")
+        print("\n=== Lead Gen Agent — GLOBAL MODE ===")
         print("1. Run prospecting (find new leads)")
         print("2. Send email outreach")
         print("3. Send WhatsApp outreach")
@@ -321,7 +392,7 @@ async def main_loop():
         
         try:
             if choice == "1":
-                count = await run_prospecting(db, scraper, scorer, outbound, whatsapp)
+                count = await run_prospecting(db, c)
                 print(f"Found {count} prospects")
             
             elif choice == "2":
@@ -398,7 +469,7 @@ def parse_args(argv=None):
     )
     group = parser.add_mutually_exclusive_group()
     group.add_argument("--prospect", action="store_const", const="prospect", dest="mode",
-                       help="Run DuckDuckGo/Google prospecting once and exit")
+                       help="Run GLOBAL multi-source prospecting once and exit")
     group.add_argument("--linkedin", action="store_const", const="linkedin", dest="mode",
                        help="Run LinkedIn prospecting once and exit")
     group.add_argument("--outreach", action="store_const", const="outreach", dest="mode",

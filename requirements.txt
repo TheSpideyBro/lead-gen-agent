@@ -9,4 +9,6 @@ fpdf2>=2.7.0
 matplotlib>=3.8.0
 apscheduler>=3.10.0
 playwright>=1.40.0
-pyflakes>=3.0.0  # used by scripts/precommit_check.py (pre-commit sanity gate)
+pytz>=2024.1        # timezone-aware scheduling (Section 3)
+pycountry>=23.12.11 # country -> timezone/language resolution (Sections 3 & 5)
+pyflakes>=3.0.0     # used by scripts/precommit_check.py (pre-commit sanity gate)
