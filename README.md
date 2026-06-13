@@ -187,12 +187,28 @@ On first use, select **option 7**. A browser opens to WhatsApp Web — scan the 
 
 ## Automation
 
-Schedule unattended runs with cron (Linux/macOS) or Task Scheduler (Windows):
+Run with **no flags** for the interactive menu. Pass a **single mode flag** to run
+that action once and exit — ideal for cron (Linux/macOS) or Task Scheduler (Windows).
+
+| Flag | Action |
+|------|--------|
+| `--prospect` | Run DuckDuckGo/Google prospecting once |
+| `--linkedin` | Run LinkedIn prospecting once |
+| `--outreach` | Send pending email outreach once |
+| `--whatsapp` | Send pending WhatsApp outreach once |
+| `--responses` | Check & classify email replies once |
+| `--report` | Generate the analytics report once |
 
 ```bash
-python main.py --prospect    # discover new leads daily
-python main.py --outreach     # process due follow-ups
+python main.py --prospect     # discover new leads daily
+python main.py --outreach      # send due email follow-ups
+python main.py --responses     # process inbound replies
+python main.py --report        # refresh the analytics chart
 ```
+
+> Browser-based modes (`--linkedin`, `--whatsapp`) require a persisted Playwright
+> session and won't complete headlessly without prior login. The flags are mutually
+> exclusive — pass one per invocation.
 
 ---
 
