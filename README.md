@@ -212,6 +212,23 @@ python main.py --report        # refresh the analytics chart
 
 ---
 
+## Development
+
+This repo supports concurrent work by multiple agents, each in its own isolated
+Git-worktree workspace (separate directory + branch, shared history) so they
+never overwrite each other's files. A shared pre-commit gate
+(`scripts/precommit_check.py`) blocks any commit that fails to compile or
+references an undefined name.
+
+```bash
+scripts/agent_workspace.sh new <agent>     # spin up an isolated workspace
+scripts/agent_workspace.sh list            # list workspaces
+```
+
+See **[WORKSPACES.md](WORKSPACES.md)** for the full workflow.
+
+---
+
 ## Disclaimer
 
 This tool automates outreach across email, WhatsApp, and LinkedIn. You are responsible for complying with the terms of service of each platform and with applicable anti-spam and data-protection laws (e.g. CAN-SPAM, GDPR). Use responsibly, respect opt-outs, and only contact prospects where you have a lawful basis to do so.
