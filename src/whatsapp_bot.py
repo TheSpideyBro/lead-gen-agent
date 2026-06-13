@@ -113,6 +113,8 @@ class WhatsAppBot:
                     processed += 1
                     
                 elif classification == "stop":
+                    # Section 6: record a global opt-out (suppression list).
+                    await self.db.add_unsubscribe(phone=phone, reason="whatsapp stop")
                     if lead_id:
                         await self.db.update_lead_status(lead_id, "unsubscribed")
                         await self.db.stop_all_sequences(lead_id)

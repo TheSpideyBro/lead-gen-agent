@@ -108,7 +108,17 @@ class LeadDatabase:
                 ip_address TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS global_unsubscribe (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT,
+                phone TEXT,
+                unsubscribed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                reason TEXT
+            );
+
             CREATE INDEX IF NOT EXISTS idx_leads_status ON leads(status);
+            CREATE INDEX IF NOT EXISTS idx_unsub_email ON global_unsubscribe(email);
+            CREATE INDEX IF NOT EXISTS idx_unsub_phone ON global_unsubscribe(phone);
             CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(score);
             CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email);
             CREATE INDEX IF NOT EXISTS idx_opens_lead ON email_opens(lead_id);
@@ -297,3 +307,22 @@ class LeadDatabase:
             "WHERE status IN ('booking_sent', 'qualified') ORDER BY score DESC"
         )
         return await cursor.fetchall()
+
+    async def add_unsubscribe(self, email: str = None, phone: str = None, reason: str = ""):
+        """Record a global opt-out so the contact is never messaged again."""
+        await self.db.execute(
+            "INSERT INTO global_unsubscribe (email, phone, reason) VALUES (?, ?, ?)",
+            (email, phone, reason),
+        )
+        await self.db.commit()
+
+    async def is_unsubscribed(self, email: str = None, phone: str = None) -> bool:
+        """True if this email or phone appears in the global suppression list."""
+        if not email and not phone:
+            return False
+        cursor = await self.db.execute(
+            "SELECT 1 FROM global_unsubscribe WHERE "
+            "(email IS NOT NULL AND email = ?) OR (phone IS NOT NULL AND phone = ?) LIMIT 1",
+            (email, phone),
+        )
+        return (await cursor.fetchone()) is not None

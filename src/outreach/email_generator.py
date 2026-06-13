@@ -7,6 +7,7 @@ from src.ai_client import AIClient
 from src.outreach.email_sender import EmailSender
 from src.scheduling.timezone_scheduler import TimezoneScheduler
 from src.language.lang_handler import LangHandler
+from src.compliance.compliance_handler import ComplianceHandler
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ class OutreachSequence:
         self.whatsapp = whatsapp_bot
         self.scheduler = TimezoneScheduler()
         self.lang = LangHandler(getattr(message_gen, "ai", None))
+        self.compliance = ComplianceHandler(db)
 
     async def schedule_sequence(self, lead_id: int, channel: str = "email"):
         """Schedule each step in the RECIPIENT's local optimal window.
@@ -152,6 +154,11 @@ class OutreachSequence:
         pending = await self.db.get_pending_emails()
         sent_count = 0
         for seq_id, lead_id, step, email, name, company in pending:
+            # Section 6: never contact a globally-suppressed address.
+            if await self.compliance.is_suppressed(email=email):
+                logger.info("Skipping suppressed email %s", email)
+                await self.db.mark_email_sent(seq_id)
+                continue
             lead = await self.db.get_lead_by_id(lead_id)
             if step == 1:
                 subject, body = await self.msg_gen.generate_initial_message(lead, "email")
@@ -159,9 +166,14 @@ class OutreachSequence:
                 subject, body = await self.msg_gen.generate_followup(lead, step, "email")
             # Localize subject + body to the recipient's language (Section 5).
             country = (lead or {}).get("country") or (lead or {}).get("location")
+            country_code = self.scheduler.country_to_code(country)
             subject, _ = await self.lang.localize(subject, country)
             body, _ = await self.lang.localize(body, country)
+            # Append compliant footer (physical address + opt-out + GDPR notice).
+            body = self.compliance.ensure_email_compliant(body, country_code)
             await sender.send_email(email, subject, body, lead_id=lead_id, sequence_id=seq_id)
+            self.compliance.log_send("email", email, lead_id,
+                                     self.compliance.region_for_country(country_code))
             await self.db.log_outreach(lead_id, "email", subject, body)
             await self.db.mark_email_sent(seq_id)
             sent_count += 1
@@ -173,6 +185,10 @@ class OutreachSequence:
         sent_count = 0
         for seq_id, lead_id, channel, step, phone, name, company in pending:
             if channel == "whatsapp":
+                # Section 6: respect global suppression list.
+                if await self.compliance.is_suppressed(phone=phone):
+                    await self.db.mark_message_sent(seq_id)
+                    continue
                 lead = await self.db.get_lead_by_id(lead_id)
                 if step == 1:
                     _, body = await self.msg_gen.generate_initial_message(lead, "whatsapp")
