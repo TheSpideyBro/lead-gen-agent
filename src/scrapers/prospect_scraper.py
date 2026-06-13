@@ -3,10 +3,9 @@ import json
 import logging
 import os
 import re
-import urllib.parse
 from dataclasses import dataclass
 from typing import List, Optional
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote
 import aiohttp
 from bs4 import BeautifulSoup
 
@@ -93,7 +92,7 @@ class GoogleSearchScraper:
                         for a in body.select("a"):
                             href = a.get("href", "")
                             if href and "duckduckgo.com/l/?uddg=" in href:
-                                decoded = urllib.parse.unquote(href.split("uddg=")[1].split("&")[0])
+                                decoded = unquote(href.split("uddg=")[1].split("&")[0])
                                 if decoded.startswith("http"):
                                     link = decoded
                                     break

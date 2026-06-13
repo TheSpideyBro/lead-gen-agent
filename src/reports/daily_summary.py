@@ -50,14 +50,14 @@ class DailySummary:
 
     async def _count_emails_sent_today(self, today: str) -> int:
         cursor = await self.db.db.execute(
-            "SELECT COUNT(*) FROM message_sequences WHERE channel = 'email' AND sent = 1 AND date(scheduled_for) = ?", (today,)
+            "SELECT COUNT(*) FROM sequences WHERE channel = 'email' AND sent = 1 AND date(scheduled_for) = ?", (today,)
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
 
     async def _count_whatsapp_sent_today(self, today: str) -> int:
         cursor = await self.db.db.execute(
-            "SELECT COUNT(*) FROM message_sequences WHERE channel = 'whatsapp' AND sent = 1 AND date(scheduled_for) = ?", (today,)
+            "SELECT COUNT(*) FROM sequences WHERE channel = 'whatsapp' AND sent = 1 AND date(scheduled_for) = ?", (today,)
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
@@ -67,7 +67,8 @@ class DailySummary:
             "SELECT classification, COUNT(*) FROM email_responses WHERE date(received_at) = ? GROUP BY classification", (today,)
         )
         rows = await cursor.fetchall()
-        result = {"interested": 0, "question": 0, "uninterested": 0, "out_of_office": 0}
+        # Canonical classification vocabulary used by EmailResponsePoller.
+        result = {"interested": 0, "question": 0, "not_interested": 0, "out_of_office": 0}
         for classification, count in rows:
             if classification in result:
                 result[classification] = count
@@ -81,20 +82,25 @@ class DailySummary:
         return row[0] if row else 0
 
     async def _count_qualified_leads(self) -> int:
+        # Qualified means actually qualified (auto-replied to an interested
+        # lead or accepted a Calendly slot), not merely high-scoring. The
+        # previous query inflated the metric by counting every 'hot'/'warm'
+        # lead. See code review B10.
         cursor = await self.db.db.execute(
-            "SELECT COUNT(*) FROM leads WHERE status IN ('hot', 'warm')"
+            "SELECT COUNT(*) FROM leads WHERE status = 'qualified'"
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
 
     async def _count_pending_followups_today(self, today: str) -> int:
         cursor = await self.db.db.execute(
-            "SELECT COUNT(*) FROM message_sequences WHERE sent = 0 AND date(scheduled_for) = ?", (today,)
+            "SELECT COUNT(*) FROM sequences WHERE sent = 0 AND date(scheduled_for) = ?", (today,)
         )
         row = await cursor.fetchone()
         return row[0] if row else 0
 
     def format_whatsapp_message(self, stats: Dict[str, Any]) -> str:
+        responses = stats.get("responses", {}) or {}
         lines = [
             "Daily Lead Gen Report",
             "",
@@ -106,10 +112,10 @@ class DailySummary:
             f"Qualified leads: {stats['qualified_leads']}",
             "",
             "Responses today:",
-            f"  Interested: {stats['responses'].get('interested', 0)}",
-            f"  Questions: {stats['responses'].get('question', 0)}",
-            f"  Not interested: {stats['responses'].get('uninterested', 0)}",
-            f"  OOO: {stats['responses'].get('out_of_office', 0)}",
+            f"  Interested: {responses.get('interested', 0)}",
+            f"  Questions: {responses.get('question', 0)}",
+            f"  Not interested: {responses.get('not_interested', 0)}",
+            f"  OOO: {responses.get('out_of_office', 0)}",
             "",
             f"Pending follow-ups: {stats['pending_followups']}",
         ]

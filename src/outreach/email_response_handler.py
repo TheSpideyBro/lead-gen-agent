@@ -13,9 +13,13 @@ logger = logging.getLogger(__name__)
 
 
 class EmailResponsePoller:
-    def __init__(self, db, ai_client):
+    # Canonical classification vocabulary — keep in sync with daily_summary.
+    VALID_CLASSIFICATIONS = {"interested", "not_interested", "question", "out_of_office"}
+
+    def __init__(self, db, ai_client, email_sender=None):
         self.db = db
         self.ai = ai_client
+        self.email_sender = email_sender or EmailSender()
         self.email_address = os.getenv("EMAIL_ADDRESS", "")
         self.email_password = os.getenv("EMAIL_PASSWORD", "")
         self.imap_server = os.getenv("IMAP_SERVER", "imap.gmail.com")
@@ -32,10 +36,11 @@ class EmailResponsePoller:
             logger.warning("Email credentials not configured for IMAP")
             return 0
 
+        M = None
         try:
             leads = await self.db.get_all_leads_with_email()
             count = 0
-            
+
             M = await asyncio.to_thread(
                 imaplib.IMAP4_SSL, self.imap_server, self.imap_port
             )
@@ -48,11 +53,11 @@ class EmailResponsePoller:
                     msg_hash = hashlib.md5(f"{msg_id}:{lead_id}".encode()).hexdigest()
                     if msg_hash in self._processed_messages:
                         continue
-                    
+
                     msg_data = await self._fetch_message(M, msg_id)
                     if not msg_data:
                         continue
-                    
+
                     subject, body = self._parse_message(msg_data)
                     classification = await self._classify_reply(body)
                     await self.db.log_email_response(lead_id, subject, body, classification)
@@ -70,21 +75,49 @@ class EmailResponsePoller:
                     elif classification == "question":
                         await self._send_answer(lead_email, lead_id, body)
 
-            await asyncio.to_thread(M.close)
-            await asyncio.to_thread(M.logout)
             return count
 
         except Exception as exc:
-            logger.error(f"IMAP error: {exc}")
+            # Don't echo the raw exception — imaplib includes the failing
+            # search command, which leaks recipient addresses.  See review S5.
+            logger.error("IMAP polling failed: %s", type(exc).__name__)
             return 0
+        finally:
+            if M is not None:
+                # Best-effort close: never let an exception strand an open
+                # IMAP connection.  See review B4.
+                try:
+                    await asyncio.to_thread(M.close)
+                except Exception:
+                    pass
+                try:
+                    await asyncio.to_thread(M.logout)
+                except Exception:
+                    pass
 
     async def _search_messages(self, M, lead_email: str) -> list:
-        status, messages = await asyncio.to_thread(
-            M.search, None, f'FROM "{lead_email}" SINCE "{datetime.now().strftime("%d-%b-%Y")}"'
-        )
+        # RFC 3501 — FROM takes a quoted *display name*; to filter by address
+        # we wrap the address in angle brackets and use the address atom.  See
+        # code review B5.  The previous `FROM "{email}"` form returned zero
+        # results on Gmail/Outlook because they interpret it as a display name.
+        from email.utils import parseaddr
+
+        today = datetime.now().strftime("%d-%b-%Y")
+        # Sanitize: never put the raw user input inside a quoted-string.
+        safe_email = lead_email.replace("\\", "").replace('"', "")
+        criteria = f'(FROM "<{safe_email}>") SINCE {today}'
+        try:
+            status, messages = await asyncio.to_thread(M.search, None, criteria)
+        except Exception as exc:
+            logger.warning(
+                "IMAP search with addr atom failed (%s); retrying plain",
+                type(exc).__name__,
+            )
+            criteria = f'FROM "{safe_email}" SINCE {today}'
+            status, messages = await asyncio.to_thread(M.search, None, criteria)
         if status != "OK":
             return []
-        return messages[0].split()
+        return messages[0].split() if messages and messages[0] else []
 
     async def _fetch_message(self, M, msg_id) -> Optional[bytes]:
         status, msg_data = await asyncio.to_thread(M.fetch, msg_id, "(RFC822)")
@@ -100,11 +133,23 @@ class EmailResponsePoller:
         return "", ""
 
     def _get_body(self, msg) -> str:
+        # Use errors="replace" rather than errors="ignore" so a mis-encoded
+        # message surfaces in the logs instead of being silently corrupted —
+        # corruption here is what causes the AI classifier to label "STOP" as
+        # "interested".  See code review S6.
+        def _decode(payload: bytes) -> str:
+            if not payload:
+                return ""
+            try:
+                return payload.decode("utf-8")
+            except UnicodeDecodeError:
+                return payload.decode("utf-8", errors="replace")
+
         if msg.is_multipart():
             for part in msg.walk():
                 if part.get_content_type() == "text/plain":
-                    return part.get_payload(decode=True).decode("utf-8", errors="ignore")
-        return msg.get_payload(decode=True).decode("utf-8", errors="ignore")
+                    return _decode(part.get_payload(decode=True))
+        return _decode(msg.get_payload(decode=True))
 
     async def _classify_reply(self, body: str) -> str:
         prompt = f"""Classify this email reply as exactly one of: interested, not_interested, question, out_of_office.
@@ -115,33 +160,29 @@ Email body:
 Respond with only the classification word."""
         result = await self.ai.generate(prompt, "You are an email classifier.")
         classification = result.strip().lower().split()[0] if result else "question"
-        valid = {"interested", "not_interested", "question", "out_of_office"}
-        return classification if classification in valid else "question"
+        return classification if classification in self.VALID_CLASSIFICATIONS else "question"
 
     async def _send_calendly(self, to_email: str, lead_id: int):
-        sender = EmailSender()
-        if self.calendly_link:
-            subject = "Quick Call to Discuss Your Marketing Needs"
-            body = f"""Thanks for your interest! Let's schedule a quick 15-minute call to discuss how I can help grow your business.
+        if not self.calendly_link:
+            return
+        subject = "Quick Call to Discuss Your Marketing Needs"
+        body = f"""Thanks for your interest! Let's schedule a quick 15-minute call to discuss how I can help grow your business.
 
 {self.calendly_link}
 
 Looking forward to connecting!"""
-            await sender.send_email(to_email, subject, body)
-            await sender.close()
+        await self.email_sender.send_email(to_email, subject, body)
 
     async def _send_answer(self, to_email: str, lead_id: int, question: str):
-        sender = EmailSender()
         lead = await self.db.get_lead_by_id(lead_id)
-        
+
         prompt = f"""Answer this prospect question briefly and helpfully:
 
 Question: "{question}"
 
 Keep under 100 words, sign off with your name."""
         answer = await self.ai.generate(prompt, "You are a helpful sales rep.")
-        await sender.send_email(to_email, "Re: Your Question", answer)
-        await sender.close()
+        await self.email_sender.send_email(to_email, "Re: Your Question", answer)
 
     async def get_pending_responses(self):
         return await self.db.get_unreplied_responses()

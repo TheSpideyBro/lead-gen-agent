@@ -14,15 +14,20 @@ async def connect_whatsapp():
     db = LeadDatabase()
     await db.connect()
     print("Database connected")
-    
+
     whatsapp = WhatsAppBot()
-    print("Starting WhatsApp Web... A browser will open for QR scan.")
-    await whatsapp.start()
-    print("WhatsApp connected successfully!")
-    
-    input("\nPress Enter to exit...")
-    await whatsapp.close()
-    await db.close()
+    try:
+        print("Starting WhatsApp Web... A browser will open for QR scan.")
+        await whatsapp.start()
+        print("WhatsApp connected successfully!")
+        input("\nPress Enter to exit...")
+    finally:
+        # Always close the browser, even if QR scan fails, so the user
+        # doesn't end up with a leaked Playwright process.
+        try:
+            await whatsapp.close()
+        finally:
+            await db.close()
 
 if __name__ == "__main__":
     asyncio.run(connect_whatsapp())
