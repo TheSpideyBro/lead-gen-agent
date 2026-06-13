@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 from typing import Dict, List
 from src.ai_client import AIClient
 from src.outreach.email_sender import EmailSender
+from src.scheduling.timezone_scheduler import TimezoneScheduler
 
 logger = logging.getLogger(__name__)
 
@@ -116,15 +117,34 @@ class OutreachSequence:
         ]
     }
 
+    # Minimum day gaps between steps; the timezone scheduler then snaps each to
+    # the next optimal local send window (replaces the fixed hour delays above).
+    STEP_GAPS_DAYS = {
+        "email": [0, 2, 2],     # immediate, +2d, +2d
+        "whatsapp": [0, 1, 2],  # immediate, +1d, +2d
+    }
+
     def __init__(self, db, message_gen: MessageGenerator, whatsapp_bot=None):
         self.db = db
         self.msg_gen = message_gen
         self.whatsapp = whatsapp_bot
+        self.scheduler = TimezoneScheduler()
 
     async def schedule_sequence(self, lead_id: int, channel: str = "email"):
-        for config in self.SEQUENCES.get(channel, self.SEQUENCES["email"]):
-            scheduled = datetime.now() + timedelta(hours=config["delay_hours"])
-            await self.db.schedule_message(lead_id, channel, config["step"], scheduled.isoformat())
+        """Schedule each step in the RECIPIENT's local optimal window.
+
+        GLOBAL-specific: resolves the lead's timezone (stored or detected from
+        country), then asks TimezoneScheduler for holiday-aware, weekday-aware
+        slots instead of blindly adding fixed hours in server time.
+        """
+        lead = await self.db.get_lead_by_id(lead_id) or {}
+        country = lead.get("country") or lead.get("location")
+        tz_name = lead.get("detected_timezone") or self.scheduler.detect_timezone(country)
+        country_code = self.scheduler.country_to_code(country)
+
+        gaps = self.STEP_GAPS_DAYS.get(channel, self.STEP_GAPS_DAYS["email"])
+        for step, when in self.scheduler.schedule_steps(tz_name, channel, gaps, country_code):
+            await self.db.schedule_message(lead_id, channel, step, when)
 
     async def process_pending_emails(self, sender) -> int:
         pending = await self.db.get_pending_emails()
