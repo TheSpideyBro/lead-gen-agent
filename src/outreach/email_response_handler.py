@@ -4,8 +4,8 @@ import email
 import asyncio
 import logging
 import os
-from datetime import datetime, timedelta
-from typing import Optional, Tuple, Dict, Any
+from datetime import datetime
+from typing import Optional, Tuple
 
 from src.outreach.email_sender import EmailSender
 from src.compliance.compliance_handler import ComplianceHandler
@@ -104,7 +104,6 @@ class EmailResponsePoller:
         # we wrap the address in angle brackets and use the address atom.  See
         # code review B5.  The previous `FROM "{email}"` form returned zero
         # results on Gmail/Outlook because they interpret it as a display name.
-        from email.utils import parseaddr
 
         today = datetime.now().strftime("%d-%b-%Y")
         # Sanitize: never put the raw user input inside a quoted-string.
@@ -178,8 +177,6 @@ Looking forward to connecting!"""
         await self.email_sender.send_email(to_email, subject, body)
 
     async def _send_answer(self, to_email: str, lead_id: int, question: str):
-        lead = await self.db.get_lead_by_id(lead_id)
-
         prompt = f"""Answer this prospect question briefly and helpfully:
 
 Question: "{question}"

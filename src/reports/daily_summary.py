@@ -1,6 +1,5 @@
 # AGENT_OWNER: analytics-001
 # TASK_ID: daily-summary-report
-import asyncio
 import logging
 import os
 from typing import Dict, Any

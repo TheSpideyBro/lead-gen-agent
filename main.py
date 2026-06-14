@@ -2,9 +2,8 @@ import asyncio
 import json
 import logging
 import os
-import sys
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -234,15 +233,16 @@ async def view_booking_pipeline(db):
     if not leads:
         print("No leads in booking pipeline yet.")
         return
-    
+
     print("\nBooking Pipeline:")
     for lead in leads[:10]:
-        lead_id, company, contact, email, phone, status = lead[0], lead[1], lead[2], lead[3], lead[4], lead[5]
+        _lid, company, contact, email, phone, status = lead[:6]
         print(f" - {company} ({contact or 'unknown'}) [{status}]")
         if email:
             print(f"   Email: {email}")
         if phone:
             print(f"   Phone: {phone}")
+        del _lid  # explicitly mark intentionally unused
 
 
 async def show_open_stats(db):
@@ -360,10 +360,8 @@ async def main_loop():
     await tracking_server.start()
 
     c = build_components(db)
-    ai = c["ai"]
     scraper = c["scraper"]
     scorer = c["scorer"]
-    msg_gen = c["msg_gen"]
     whatsapp = c["whatsapp"]
     analytics = c["analytics"]
     outbound = c["outbound"]
