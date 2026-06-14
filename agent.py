@@ -133,6 +133,8 @@ class Task:
     last_result: int = 0
     runs: int = 0
     failures: int = 0
+    consecutive_failures: int = 0         # resets on any success
+    re_enable_at: Optional[float] = None  # monotonic deadline; None = active
 
     def __post_init__(self):
         if self.interval <= 0:
@@ -170,6 +172,11 @@ class TaskScheduler:
 
         Sequential by design: all services share ONE aiosqlite connection
         (db.db), which is not safe for concurrent writes. Never gather these.
+
+        Auto-disable: a task that has failed 3 times consecutively is
+        disabled for 1 hour and the owner is alerted. This is the spec's
+        "If a task fails 3 times in a row: disable it temporarily, alert
+        me, retry after 1 hour" rule.
         """
         total = 0
         for task in self.due_tasks():
@@ -182,31 +189,65 @@ class TaskScheduler:
                 total += result
                 if result:
                     agent.tasks_completed_today += 1
+                # Reset the failure-streak on any success.
+                if result > 0:
+                    task.consecutive_failures = 0
                 agent.monitor.log_action(task.name, "ok", detail={"result": result},
                                          task=task.name)
             except Exception as exc:  # a task failing must never stop the loop
                 task.failures += 1
+                task.consecutive_failures = int(getattr(task, "consecutive_failures", 0)) + 1
                 task.last_result = 0
                 result = 0
                 logger.error("task %s failed: %s", task.name, exc)
                 agent.monitor.log_action(task.name, "error", detail=str(exc),
                                          task=task.name)
+                # Auto-disable on 3 consecutive failures, retry in 1 hour.
+                if task.consecutive_failures >= 3 and task.enabled:
+                    task.enabled = False
+                    task.re_enable_at = time.monotonic() + 3600.0
+                    try:
+                        agent.monitor.log_action(
+                            task.name, "auto_disabled",
+                            detail={"after_failures": task.consecutive_failures,
+                                    "re_enable_in_s": 3600},
+                            task=task.name,
+                        )
+                    except Exception:
+                        pass
             finally:
                 task.last_run = _utcnow().isoformat()
-                self._adjust_cooldown(task)
+                self._maybe_re_enable(task)
+                self._adjust_cooldown(task, agent)
                 task.next_run = time.monotonic() + task.interval
                 agent.current_task = None
         return total
 
-    def _adjust_cooldown(self, task: Task):
+    def _maybe_re_enable(self, task: Task) -> None:
+        """Re-enable a task that was auto-disabled, once its cooldown elapses."""
+        if task.enabled:
+            return
+        re_enable_at = getattr(task, "re_enable_at", None)
+        if re_enable_at is None:
+            return
+        if time.monotonic() >= re_enable_at:
+            task.enabled = True
+            task.re_enable_at = None
+            task.consecutive_failures = 0
+            logger.info("task %s re-enabled after backoff", task.name)
+
+    def _adjust_cooldown(self, task: Task, agent: "AutonomousAgent" = None) -> None:
         """Dynamic cooldown: tighten when productive, back off when idle.
 
         Clock-gated tasks (daily report, weekly cleanup) decide their own timing
         inside func(), so we only refresh their poll interval, not a backoff.
+        Also factors in API quota health: a task backed by a near-exhausted
+        API is throttled so we don't trip the 80% alert (see spec §2.4).
         """
         if task.clock_gated:
             task.interval = task.base_interval
             return
+        # 1. Productivity-based scaling (existing behaviour).
         if task.last_result > 0:
             task.consecutive_idle = 0
             task.interval = max(task.min_interval, task.interval * 0.5)
@@ -214,6 +255,41 @@ class TaskScheduler:
             task.consecutive_idle += 1
             factor = 1.5 if task.consecutive_idle < 3 else 2.0
             task.interval = min(task.max_interval, task.interval * factor)
+        # 2. Quota-based throttling (spec §2.4).  If a task's name matches an
+        #    API source and that source is at >=80% of its daily quota, we
+        #    4x the interval.  At >=100% (can_spend=False) we disable the
+        #    task temporarily; _maybe_re_enable will reset it later.
+        if agent is None:
+            return
+        source = self._api_source_for_task(task.name)
+        if not source:
+            return
+        try:
+            usage = agent.components.get("usage")
+        except Exception:
+            usage = None
+        if usage is None:
+            return
+        try:
+            if not usage.can_spend(source):
+                task.enabled = False
+                return
+            info = usage.snapshot().get(source, {})
+            if info and info.get("limit") and info["used"] >= 0.8 * info["limit"]:
+                task.interval = min(task.max_interval, task.interval * 4.0)
+        except Exception:
+            pass
+
+    # ----- task name -> API source mapping (spec §2.4) -------------------
+    @staticmethod
+    def _api_source_for_task(task_name: str) -> Optional[str]:
+        """Map a task name to an APIUsageTracker source name, if any."""
+        return {
+            "prospect_new_leads": "apollo",   # primary; gh/ph roll-over
+            "send_initial_outreach": "groq",
+            "send_followups": "groq",
+            "check_replies": "groq",
+        }.get(task_name)
 
 
 # ===========================================================================
@@ -358,22 +434,204 @@ class DecisionEngine:
         except Exception as exc:
             logger.debug("owner notify failed: %s", exc)
 
-    # ----- decision tree --------------------------------------------------
-    async def decide_next_action(self, agent: "AutonomousAgent") -> list[Decision]:
-        """Inspect DB state and return an ordered batch of reactive decisions."""
+    # ------------------------------------------------------------------ helpers
+    async def _lead_summary(self, lead_id: int) -> dict:
+        """Lead row + outreach counts in one call. Used by decide_next_action.
+
+        Counting both the total and the unhandled-reply count here lets
+        the decision engine apply 6 of the 7 rules without re-querying
+        the DB per lead.
+        """
+        try:
+            lead = await self.db.get_lead_by_id(lead_id) or {}
+        except Exception:
+            return {}
+        if not lead:
+            return {}
+        try:
+            cur = await self.db.db.execute(
+                "SELECT COUNT(*) FROM outreach WHERE lead_id = ?", (lead_id,))
+            outreach_count = (await cur.fetchone() or (0,))[0]
+        except Exception:
+            outreach_count = 0
+        try:
+            cur = await self.db.db.execute(
+                "SELECT COUNT(*) FROM email_responses "
+                "WHERE lead_id = ? AND replied = 0", (lead_id,))
+            unhandled_questions = (await cur.fetchone() or (0,))[0]
+        except Exception:
+            unhandled_questions = 0
+        try:
+            cur = await self.db.db.execute(
+                "SELECT 1 FROM email_opens WHERE lead_id = ? LIMIT 1", (lead_id,))
+            has_opened = (await cur.fetchone() is not None)
+        except Exception:
+            has_opened = False
+        lead["outreach_count"] = outreach_count
+        lead["unhandled_questions"] = unhandled_questions
+        lead["has_opened"] = has_opened
+        return lead
+
+    def _parse_hours_since(self, ts_str: str) -> float:
+        """Return hours since the given ISO-8601 timestamp, or +inf if missing."""
+        if not ts_str:
+            return float("inf")
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except Exception:
+            return float("inf")
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        try:
+            return (_utcnow() - ts).total_seconds() / 3600.0
+        except Exception:
+            return float("inf")
+
+    # -------------------------------------------------- the 7-rule decision tree
+    async def decide_next_action(self, lead: dict) -> Optional[Decision]:
+        """The spec's per-lead decision tree.
+
+        Returns ONE Decision the agent should execute *now*, or None if
+        no action is warranted. Rules (first match wins):
+
+          1. qualified + 48h+ since last       -> booking reminder
+          2. unanswered question reply         -> URGENT AI answer
+          3. interested + 24h+ since last      -> value follow-up
+          4. hot + never contacted            -> schedule immediate outreach
+          5. warm + never contacted, score>=45 -> schedule within 4h
+          6. opened email + no reply, 48h+     -> WhatsApp referencing the email
+          7. 3 emails + 3 WhatsApp, no reply  -> breakup, mark "exhausted"
+        """
+        if not lead:
+            return None
+        status = (lead.get("status") or "").lower()
+        last_h = self._parse_hours_since(lead.get("last_contacted"))
+        outreach_n = int(lead.get("outreach_count", 0) or 0)
+        opened = bool(lead.get("has_opened"))
+        unhandled_q = int(lead.get("unhandled_questions", 0) or 0)
+
+        # 1. qualified + 48h+ since last touch (max-once-per-48h)
+        if status == "qualified" and last_h >= 48:
+            return Decision("booking_reminder", 2, {
+                "lead_id": lead.get("id"),
+                "reason": "qualified+48h_no_booking",
+            })
+
+        # 2. URGENT: a question reply that hasn't been answered yet.
+        if unhandled_q > 0 and status != "unsubscribed":
+            return Decision("answer_question", 1, {
+                "lead_id": lead.get("id"),
+                "reason": "unanswered_question",
+            })
+
+        # 3. interested + 24h+ since last touch
+        if status == "interested" and last_h >= 24:
+            return Decision("value_followup", 3, {
+                "lead_id": lead.get("id"),
+                "reason": "interested+24h",
+            })
+
+        # 4. hot + never contacted
+        if status == "hot" and outreach_n == 0:
+            return Decision("initial_outreach", 3, {
+                "lead_id": lead.get("id"),
+                "reason": "hot+never_contacted",
+            })
+
+        # 5. warm + never contacted, score >= 45
+        try:
+            score = int(lead.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0
+        if status == "warm" and outreach_n == 0 and score >= 45:
+            return Decision("initial_outreach", 4, {
+                "lead_id": lead.get("id"),
+                "reason": "warm+never_contacted+score>=45",
+            })
+
+        # 6. opened email but no reply, 48h+
+        if (opened and status not in ("interested", "qualified", "unsubscribed")
+                and outreach_n > 0 and last_h >= 48):
+            return Decision("whatsapp_followup", 3, {
+                "lead_id": lead.get("id"),
+                "reason": "opened_no_reply+48h",
+            })
+
+        # 7. 3 emails + 3 WhatsApp, no reply, no opens -> breakup
+        try:
+            cur = await self.db.db.execute(
+                "SELECT channel, COUNT(*) FROM outreach "
+                "WHERE lead_id = ? GROUP BY channel", (lead.get("id"),))
+            counts = dict(await cur.fetchall() or [])
+        except Exception:
+            counts = {}
+        if ((counts.get("email", 0) or 0) >= 3
+                and (counts.get("whatsapp", 0) or 0) >= 3
+                and not opened
+                and status not in ("interested", "qualified",
+                                    "unsubscribed", "exhausted")):
+            return Decision("breakup", 4, {
+                "lead_id": lead.get("id"),
+                "reason": "3+3_no_reply",
+            })
+
+        return None
+
+    # ----- batch entry point used by the main loop -----------------------
+    async def decide_batch(self, agent: "AutonomousAgent",
+                            lead_limit: int = 200) -> list[Decision]:
+        """Iterate all actionable leads, return one Decision per lead.
+
+        Bounded by `lead_limit` to keep the every-2-hours decision batch
+        from scanning millions of historical rows on a long-running install.
+        """
         if agent.state == AgentState.PAUSED:
             return []
         decisions: list[Decision] = []
+        # 1) Reactive: route any unhandled email replies first.
+        decisions.extend(await self._scan_pending_replies())
+        # 2) Proactive: walk active leads and apply the 7-rule tree.
         try:
-            # 1. Unhandled email replies → route through handle_reply (top prio).
-            unreplied = await self.db.get_unreplied_responses()
-            for row in unreplied or []:
-                resp = self._row_to_response(row)
-                if resp:
-                    decisions.append(Decision("reply", 1, resp))
+            for status in ("qualified", "interested", "hot", "warm", "new"):
+                try:
+                    rows = await self.db.get_leads_by_status(status)
+                except Exception:
+                    rows = []
+                for row in (rows or [])[:lead_limit]:
+                    try:
+                        lead_id = row[0]
+                    except Exception:
+                        continue
+                    summary = await self._lead_summary(lead_id)
+                    if not summary:
+                        continue
+                    d = await self.decide_next_action(summary)
+                    if d is not None:
+                        decisions.append(d)
+                if len(decisions) >= lead_limit:
+                    break
         except Exception as exc:
-            logger.debug("decide_next_action: unreplied scan failed: %s", exc)
+            logger.debug("decide_batch failed: %s", exc)
         return decisions
+
+    async def _scan_pending_replies(self) -> list[Decision]:
+        """Read the email_responses table for unhandled replies.
+
+        Kept as a private helper so decide_batch (event-driven) and the
+        existing main-loop check_replies task (idempotent via
+        handle_reply's status guards) share the same code.
+        """
+        out: list[Decision] = []
+        try:
+            unreplied = await self.db.get_unreplied_responses(limit=200)
+        except Exception as exc:
+            logger.debug("unreplied scan failed: %s", exc)
+            return out
+        for row in unreplied or []:
+            resp = self._row_to_response(row)
+            if resp:
+                out.append(Decision("reply", 1, resp))
+        return out
 
     def _row_to_response(self, row) -> Optional[dict]:
         """email_responses row -> normalized response dict.
@@ -411,9 +669,232 @@ class DecisionEngine:
                     if rid and not dry_run:
                         await self.db.mark_response_replied(rid)
                     handled += 1
+                elif d.kind == "answer_question":
+                    await self._answer_question(d.payload, dry_run=dry_run)
+                    handled += 1
+                elif d.kind == "booking_reminder":
+                    await self._send_booking_reminder(d.payload, dry_run=dry_run)
+                    handled += 1
+                elif d.kind == "value_followup":
+                    await self._send_value_followup(d.payload, dry_run=dry_run)
+                    handled += 1
+                elif d.kind == "whatsapp_followup":
+                    await self._send_whatsapp_followup(d.payload, dry_run=dry_run)
+                    handled += 1
+                elif d.kind == "breakup":
+                    await self._send_breakup(d.payload, dry_run=dry_run)
+                    handled += 1
+                elif d.kind == "initial_outreach":
+                    # The existing sequence-scheduler path covers this; we
+                    # just nudge it by adding the lead to the email + WA
+                    # sequences if no follow-up is currently scheduled.
+                    await self._ensure_initial_outreach(d.payload, dry_run=dry_run)
+                    handled += 1
             except Exception as exc:
                 logger.error("execute_batch decision failed: %s", exc)
         return handled
+
+    # ----- per-decision executors (idempotent) -------------------------
+    async def _answer_question(self, payload: dict, dry_run: bool) -> None:
+        """Generate an AI answer to an unhandled question reply and send it.
+
+        Idempotent: if no unhandled question is left, no-op.
+        """
+        lead_id = payload.get("lead_id")
+        if not lead_id or dry_run:
+            return
+        try:
+            responses = await self.db.get_unreplied_responses(limit=50)
+        except Exception:
+            return
+        # Find the most recent unhandled question for this lead.
+        latest = None
+        try:
+            for row in responses or []:
+                if len(row) > 1 and row[1] == lead_id:
+                    body = row[4] if len(row) > 4 else ""
+                    cls = (row[5] if len(row) > 5 else "").lower()
+                    if cls in ("question", "neutral") or "?" in (body or ""):
+                        latest = row
+                        break
+        except Exception:
+            return
+        if not latest:
+            return
+        try:
+            lead = await self.db.get_lead_by_id(lead_id) or {}
+        except Exception:
+            return
+        if not lead:
+            return
+        # Decide channel by what's in the lead record.
+        channel = "email" if lead.get("email") else "whatsapp"
+        try:
+            ai = self.c.get("ai")
+            if ai is None:
+                logger.warning("no AI client; cannot answer question for lead %s", lead_id)
+                return
+            body = (latest[4] if len(latest) > 4 else "") or ""
+            prompt = (
+                "You are a helpful B2B sales rep. A prospect asked the following "
+                "question by email. Answer briefly (under 120 words), warmly, and "
+                "with a clear next step. Do not invent facts.\n\n"
+                f"Prospect's question: {body}\n\nAnswer:"
+            )
+            try:
+                answer = await ai.generate(prompt, "You are a helpful sales rep.")
+            except Exception as exc:
+                logger.error("AI answer generation failed: %s", exc)
+                return
+            if channel == "email":
+                sender = self.c.get("email_sender")
+                if sender is not None and lead.get("email"):
+                    try:
+                        await sender.send_email(
+                            lead.get("email"), "Re: your question",
+                            f"Hi {lead.get('contact_name') or 'there'},\n\n{answer}",
+                            lead_id=lead_id, sequence_id=None,
+                        )
+                    except Exception as exc:
+                        logger.error("send answer email failed: %s", exc)
+                        return
+            else:
+                wa = self.c.get("whatsapp")
+                if wa is not None and lead.get("phone"):
+                    try:
+                        await wa.send_message(lead.get("phone"), answer)
+                    except Exception as exc:
+                        logger.error("send answer whatsapp failed: %s", exc)
+                        return
+            try:
+                await self.db.mark_response_replied(latest[0])
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.error("_answer_question(%s) failed: %s", lead_id, exc)
+
+    async def _send_booking_reminder(self, payload: dict, dry_run: bool) -> None:
+        """Rule 1: send a Calendly reminder to a qualified lead after 48h."""
+        lead_id = payload.get("lead_id")
+        if not lead_id or dry_run:
+            return
+        try:
+            lead = await self.db.get_lead_by_id(lead_id) or {}
+        except Exception:
+            return
+        if not lead:
+            return
+        try:
+            await self.c["outbound"].send_booking_outreach(lead, "email")
+        except Exception as exc:
+            logger.error("booking reminder send failed: %s", exc)
+
+    async def _send_value_followup(self, payload: dict, dry_run: bool) -> None:
+        """Rule 3: AI-generated follow-up to an 'interested' lead after 24h."""
+        lead_id = payload.get("lead_id")
+        if not lead_id or dry_run:
+            return
+        try:
+            lead = await self.db.get_lead_by_id(lead_id) or {}
+        except Exception:
+            return
+        if not lead:
+            return
+        try:
+            msg_gen = self.c.get("msg_gen")
+            if msg_gen is None:
+                return
+            subject, body = await msg_gen.generate_followup(lead, step=2, channel="email")
+        except Exception as exc:
+            logger.error("value followup generation failed: %s", exc)
+            return
+        try:
+            sender = self.c.get("email_sender")
+            if sender is not None and lead.get("email"):
+                await sender.send_email(lead.get("email"), subject, body,
+                                         lead_id=lead_id, sequence_id=None)
+        except Exception as exc:
+            logger.error("value followup send failed: %s", exc)
+
+    async def _send_whatsapp_followup(self, payload: dict, dry_run: bool) -> None:
+        """Rule 6: WhatsApp a lead who opened the email but didn't reply in 48h."""
+        lead_id = payload.get("lead_id")
+        if not lead_id or dry_run:
+            return
+        try:
+            lead = await self.db.get_lead_by_id(lead_id) or {}
+        except Exception:
+            return
+        if not (lead and lead.get("phone")):
+            return
+        try:
+            wa = self.c.get("whatsapp")
+            if wa is None:
+                return
+            msg = (
+                f"Hi {lead.get('contact_name') or 'there'}, "
+                "I noticed you opened my last email. Did you get a chance to look at it? "
+                "Happy to answer any questions — just hit reply."
+            )
+            await wa.send_message(lead.get("phone"), msg)
+        except Exception as exc:
+            logger.error("whatsapp followup send failed: %s", exc)
+
+    async def _send_breakup(self, payload: dict, dry_run: bool) -> None:
+        """Rule 7: 3+3 outreach, no opens, no replies -> final breakup message."""
+        lead_id = payload.get("lead_id")
+        if not lead_id or dry_run:
+            return
+        try:
+            lead = await self.db.get_lead_by_id(lead_id) or {}
+        except Exception:
+            return
+        if not lead:
+            return
+        try:
+            msg = (
+                f"Hi {lead.get('contact_name') or 'there'}, this is my last note. "
+                "I won't follow up further. If you ever want to revisit, "
+                "the door is open."
+            )
+            if lead.get("email"):
+                sender = self.c.get("email_sender")
+                if sender is not None:
+                    await sender.send_email(lead.get("email"), "Closing the loop",
+                                             msg, lead_id=lead_id, sequence_id=None)
+            elif lead.get("phone"):
+                wa = self.c.get("whatsapp")
+                if wa is not None:
+                    await wa.send_message(lead.get("phone"), msg)
+            await self.db.update_lead_status(lead_id, "exhausted")
+        except Exception as exc:
+            logger.error("breakup send failed: %s", exc)
+
+    async def _ensure_initial_outreach(self, payload: dict, dry_run: bool) -> None:
+        """Rule 4/5: ensure the lead is on a sequence; defer to schedule_sequence.
+
+        Idempotent: schedule_sequence itself no-ops when a pending row
+        already exists for the same (lead, channel, step) (UNIQUE index).
+        """
+        lead_id = payload.get("lead_id")
+        if not lead_id or dry_run:
+            return
+        try:
+            lead = await self.db.get_lead_by_id(lead_id) or {}
+        except Exception:
+            return
+        if not lead:
+            return
+        if lead.get("email"):
+            try:
+                await self.c["outbound"].schedule_sequence(lead_id, "email")
+            except Exception as exc:
+                logger.error("schedule email failed: %s", exc)
+        if lead.get("phone"):
+            try:
+                await self.c["outbound"].schedule_sequence(lead_id, "whatsapp")
+            except Exception as exc:
+                logger.error("schedule whatsapp failed: %s", exc)
 
 
 # ===========================================================================
@@ -476,7 +957,7 @@ class AgentMonitor:
         return metrics
 
     async def check_alerts(self, agent: "AutonomousAgent", metrics: dict) -> list[str]:
-        """Evaluate the 4 alert conditions; DM the owner (rate-limited)."""
+        """Evaluate the 5 alert conditions; DM the owner (rate-limited)."""
         alerts: list[str] = []
 
         # 1. Stalled: up over an hour but nothing completed today.
@@ -500,6 +981,27 @@ class AgentMonitor:
         wa = self.c.get("whatsapp")
         if getattr(wa, "page", "n/a") is None:  # web provider with no live session
             alerts.append("WhatsApp web session is not connected.")
+
+        # 5. NEW: qualified lead that hasn't been followed up in 6+ hours
+        #    (spec §4.3: "🔥 Don't miss this lead").  Cheap to compute; we
+        #    cap at the first 5 to keep the WhatsApp DM scannable.
+        try:
+            stale_qualified = await self.db.db.execute(
+                "SELECT id, company_name FROM leads "
+                "WHERE status = 'qualified' "
+                "AND (last_contacted IS NULL "
+                "  OR datetime(last_contacted) <= datetime('now', '-6 hours')) "
+                "ORDER BY COALESCE(last_contacted, '1970-01-01') ASC LIMIT 5")
+            rows = await stale_qualified.fetchall()
+        except Exception:
+            rows = []
+        if rows:
+            pretty = ", ".join(
+                (r[1] if r[1] else f"lead #{r[0]}") for r in rows)
+            alerts.append(
+                "Qualified leads not followed up in 6h+ — call them now: "
+                f"{pretty}"
+            )
 
         for msg in alerts:
             await self._fire_alert(msg)
@@ -672,11 +1174,69 @@ class AutonomousAgent:
                     logger.error("whatsapp poll failed: %s", exc)
             return done
 
+        # ----- Spec §2.2 gates: working hours, lead pool, score threshold
+        # We resolve targeting + min-score from config/global_targeting.json
+        # once at registration time and capture the values in the closure.
+        targeting = self._load_targeting()
+        min_score_to_contact = int(targeting.get("min_score_to_contact", 40))
+
+        def _in_working_hours() -> bool:
+            """Spec §2.2: send_followups should only run 8-18h in the OWNER's tz.
+
+            The existing daily/weekly tasks are still clock-gated, but the
+            outreach cadence was unbounded.  We use OWNER_TZ as the proxy
+            for "the markets we are actively engaging with" — for a multi-tz
+            rollout the right answer is per-recipient timezone, which
+            OutreachSequence already enforces.
+            """
+            hour = self._owner_local_hour()
+            return 8 <= hour < 18
+
+        async def _has_scoreable_lead_async() -> bool:
+            """Spec §2.2: send_initial_outreach needs a hot/warm lead
+            with score >= min_score_to_contact sitting in the DB. Cheap
+            COUNT query; fail open on errors so a broken DB never blocks
+            outreach (we'd rather over-send than not at all).
+            """
+            try:
+                cur = await self.db.db.execute(
+                    "SELECT 1 FROM leads "
+                    "WHERE status IN ('hot','warm') AND score >= ? "
+                    "LIMIT 1", (min_score_to_contact,))
+                return (await cur.fetchone()) is not None
+            except Exception:
+                return True  # fail open
+
+        async def _lead_pool_low_async(threshold: int = 50) -> bool:
+            """Spec §2.2: prospect when total leads with status='new' < 50.
+            Fail CLOSED on error (don't prospect if we can't count, to
+            avoid duplicate-discovery spam).
+            """
+            try:
+                cur = await self.db.db.execute(
+                    "SELECT COUNT(*) FROM leads WHERE status = 'new'")
+                row = await cur.fetchone()
+                if not row:
+                    return True
+                return (row[0] or 0) < threshold
+            except Exception:
+                return False
+
         async def send_initial_outreach() -> int:
+            if not _in_working_hours():
+                logger.debug("send_initial_outreach skipped: outside working hours")
+                return 0
+            if not await _has_scoreable_lead_async():
+                logger.debug("send_initial_outreach skipped: no hot/warm lead with score >= %d",
+                             min_score_to_contact)
+                return 0
             return await self._run_outreach_both()
 
         async def send_followups() -> int:
             # Same pending-sequence machinery; later steps are due-dated rows.
+            if not _in_working_hours():
+                logger.debug("send_followups skipped: outside working hours")
+                return 0
             return await self._run_outreach_both()
 
         async def prospect_new_leads() -> int:
@@ -688,6 +1248,10 @@ class AutonomousAgent:
             if not any(usage.can_spend(s) for s in ("apollo", "github_authed",
                                                     "github_anon", "producthunt")):
                 logger.info("prospecting skipped — all source quotas exhausted")
+                return 0
+            # Spec §2.2: only run when the lead pool is low.
+            if not await _lead_pool_low_async():
+                logger.debug("prospecting skipped: lead pool >= 50")
                 return 0
             try:
                 return await run_prospecting(self.db, c)
@@ -739,6 +1303,21 @@ class AutonomousAgent:
             except Exception:
                 pass
         return _utcnow().hour
+
+    def _load_targeting(self) -> dict:
+        """Read config/global_targeting.json (spec §2.2). Safe on missing file.
+
+        Returns {} on any error so callers can default sensibly.  Used by
+        _register_tasks() to capture the min_score_to_contact threshold
+        at task-registration time.
+        """
+        try:
+            from pathlib import Path as _P
+            with open(_P(__file__).parent / "config" / "global_targeting.json",
+                      encoding="utf-8") as fh:
+                return json.load(fh) or {}
+        except Exception:
+            return {}
 
     async def _maybe_daily_report(self) -> int:
         """Fire once per day around 09:00 in the owner's timezone."""
@@ -828,8 +1407,8 @@ class AutonomousAgent:
                 if self.state != AgentState.PAUSED:
                     # 2. Recurring cadence tasks (sequential — shared DB conn).
                     await self.scheduler.run_due_tasks(self)
-                    # 3. Reactive decisions (reply routing).
-                    decisions = await self.engine.decide_next_action(self)
+                    # 3. Reactive + per-lead decisions (decision tree).
+                    decisions = await self.engine.decide_batch(self)
                     if decisions:
                         await self.engine.execute_batch(decisions, self.dry_run)
 
