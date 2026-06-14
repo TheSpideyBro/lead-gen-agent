@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Tuple, Dict, Any
 
 from src.outreach.email_sender import EmailSender
+from src.compliance.compliance_handler import ComplianceHandler
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class EmailResponsePoller:
         self.calendly_link = os.getenv("CALENDLY_LINK", "")
         self.from_name = os.getenv("FROM_NAME", "Digital Marketing Expert")
         self._processed_messages: set = set()
+        self.compliance = ComplianceHandler(db)
 
     def can_poll(self) -> bool:
         return bool(self.email_address and self.email_password)
@@ -67,7 +69,9 @@ class EmailResponsePoller:
                         await self._send_calendly(lead_email, lead_id)
                         await self.db.update_lead_status(lead_id, "qualified")
                         count += 1
-                    elif classification == "not_interested":
+                    elif classification == "not_interested" or self.compliance.is_optout(body):
+                        # Section 6: record a global opt-out and stop all contact.
+                        await self.compliance.record_optout(email=lead_email, reason="email opt-out")
                         await self.db.update_lead_status(lead_id, "unsubscribed")
                         await self.db.stop_all_sequences(lead_id)
                     elif classification == "out_of_office":

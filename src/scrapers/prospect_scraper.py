@@ -26,6 +26,11 @@ class Lead:
     location: Optional[str]
     employees: Optional[int]
     source: str
+    # Global-targeting fields (optional so existing scrapers keep working).
+    country: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    funding_stage: Optional[str] = None
+    signals: Optional[dict] = None  # intent signals, e.g. {"upvotes": 120}
 
 
 class GoogleSearchScraper:
@@ -152,13 +157,72 @@ class EmailExtractor:
 
 
 class LeadScraper:
+    """Orchestrates every global lead source and merges the results.
+
+    GLOBAL-specific: instead of one location-bound search engine, we fan out to
+    Apollo (firmographic), GitHub (technical founders) and ProductHunt (active
+    launchers), then fall back to Google/DuckDuckGo. Each source self-disables
+    when its key is missing, so the orchestrator works with any subset.
+    """
+
     def __init__(self):
         self.google_scraper = GoogleSearchScraper()
         self.email_extractor = EmailExtractor()
+        # Lazy import here avoids a circular import (these modules import Lead
+        # from this file).
+        from src.scrapers.apollo_scraper import ApolloScraper
+        from src.scrapers.github_scraper import GitHubScraper
+        from src.scrapers.producthunt_scraper import ProductHuntScraper
+        self.apollo = ApolloScraper()
+        self.github = GitHubScraper()
+        self.producthunt = ProductHuntScraper()
+
+    async def find_global_prospects(self, targeting: dict) -> List[Lead]:
+        """Pull from every configured global source using firmographic targeting.
+
+        `targeting` is the parsed config/global_targeting.json dict.
+        """
+        all_leads: List[Lead] = []
+        titles = targeting.get("target_titles", ["CEO", "Founder"])
+        industries = targeting.get("industries", [])
+        size = targeting.get("company_size", {})
+        min_emp = size.get("min_employees", 10)
+        max_emp = size.get("max_employees", 200)
+
+        # 1) Apollo — firmographic people search.
+        try:
+            all_leads += await self.apollo.search_prospects(
+                titles=titles, industries=industries,
+                min_employees=min_emp, max_employees=max_emp)
+        except Exception as exc:
+            logger.warning("Apollo source failed: %s", exc)
+
+        # 2) GitHub — technical founders.
+        try:
+            all_leads += await self.github.search_prospects()
+        except Exception as exc:
+            logger.warning("GitHub source failed: %s", exc)
+
+        # 3) ProductHunt — active launchers.
+        try:
+            ph_leads = await self.producthunt.search_prospects()
+            for lead in ph_leads:
+                if lead.website and not lead.email:
+                    lead.email = await self.email_extractor.find_email(
+                        lead.website, lead.company_name)
+            all_leads += ph_leads
+        except Exception as exc:
+            logger.warning("ProductHunt source failed: %s", exc)
+
+        deduped = self._dedupe(all_leads)
+        logger.info("Global sources returned %d leads (%d after dedupe)",
+                    len(all_leads), len(deduped))
+        return deduped
 
     async def find_prospects(self, niches: List[str], locations: List[str]) -> List[Lead]:
+        """Legacy location-based search (Google/DuckDuckGo) — kept as a fallback."""
         all_leads = []
-        
+
         for niche in niches:
             for location in locations:
                 query = f"{niche} companies in {location} digital marketing"
@@ -172,8 +236,16 @@ class LeadScraper:
                         lead.email = await self.email_extractor.find_email(lead.website, lead.company_name)
                     all_leads.append(lead)
                 await asyncio.sleep(3)
-        
-        return list({lead.website: lead for lead in all_leads if lead.website}.values())
+
+        return self._dedupe(all_leads)
+
+    def _dedupe(self, leads: List[Lead]) -> List[Lead]:
+        seen = {}
+        for lead in leads:
+            key = (lead.website or "").lower() or lead.company_name.lower()
+            if key and key not in seen:
+                seen[key] = lead
+        return list(seen.values())
 
     async def cleanup_duplicate(self, leads: List[Lead]) -> List[Lead]:
         seen = set()
