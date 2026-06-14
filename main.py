@@ -2,11 +2,22 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from datetime import datetime
 
 from dotenv import load_dotenv
 load_dotenv()
+
+# Force UTF-8 on stdout/stderr so the 🌍 and other non-ASCII characters
+# in the GLOBAL banner don't crash on Windows cmd.exe (cp1252 default).
+# Reconfigure is a no-op if the stream is already UTF-8 (POSIX, modern
+# Windows Terminal, GitHub Actions).  See code review smoke test.
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:
+    pass
 
 # Ensure runtime data/output/log directories exist before any submodule tries
 # to open a file inside them.  See data/.gitkeep for the empty-directory
