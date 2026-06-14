@@ -9,14 +9,15 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 load_dotenv()
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("data/lead_bot.log"),
-    ]
-)
+# Ensure runtime data/output/log directories exist before any submodule tries
+# to open a file inside them.  See data/.gitkeep for the empty-directory
+# sentinel that is actually tracked.
+for _dir in ("data", "data/linkedin", "data/whatsapp", "output/reports"):
+    Path(_dir).mkdir(parents=True, exist_ok=True)
+del _dir
+
+from src.logging_setup import setup_logging  # noqa: E402  (after Path bootstrap)
+setup_logging()
 logger = logging.getLogger(__name__)
 
 from src.database import LeadDatabase
@@ -146,11 +147,11 @@ async def run_prospecting(db, c):
 async def run_outreach(db, outbound, channel="email"):
     sent_count = 0
     if channel == "email":
-        sender = EmailSender()
-        sent = await outbound.process_pending_emails(sender)
+        # process_pending_emails will fall back to the singleton sender the
+        # outbound was constructed with, so we no longer spin up a new SMTP
+        # connection per call.  See code review B10.
+        sent = await outbound.process_pending_emails()
         print(f"Sent {sent} emails")
-        if sent > 0:
-            await sender.close()
         sent_count = sent
     elif channel == "whatsapp":
         sent = await outbound.process_pending_whatsapp()
@@ -283,6 +284,10 @@ def build_components(db):
     whatsapp.db = db
     whatsapp.ai = ai
     msg_gen = MessageGenerator(ai)
+    # Single shared EmailSender so SMTP connections are reused across the
+    # whole process and across OutreachSequence, EmailResponsePoller, and
+    # booking outreach.  See code review B10.
+    email_sender = EmailSender()
     return {
         "ai": ai,
         "scraper": LeadScraper(),
@@ -290,8 +295,9 @@ def build_components(db):
         "msg_gen": msg_gen,
         "whatsapp": whatsapp,
         "analytics": Analytics(db),
-        "outbound": OutreachSequence(db, msg_gen, whatsapp),
-        "email_poller": EmailResponsePoller(db, ai),
+        "outbound": OutreachSequence(db, msg_gen, whatsapp, email_sender=email_sender),
+        "email_poller": EmailResponsePoller(db, ai, email_sender=email_sender),
+        "email_sender": email_sender,
         "linkedin_scraper": LinkedInScraper(),
         # GLOBAL services
         "icp": ICPScorer(),
@@ -340,6 +346,7 @@ async def run_once(mode: str):
         print(f"Error: {exc}")
     finally:
         await tracking_server.stop()
+        await c["email_sender"].close()
         await db.close()
 
 
@@ -454,6 +461,7 @@ async def main_loop():
             
             elif choice == "14":
                 await tracking_server.stop()
+                await c["email_sender"].close()
                 await db.close()
                 break
         except Exception as exc:

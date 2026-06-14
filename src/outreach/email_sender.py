@@ -20,6 +20,9 @@ class EmailSender:
         self.email_password = os.getenv("EMAIL_PASSWORD", "")
         self.from_name = os.getenv("FROM_NAME", "Digital Marketing Expert")
         self._connection: Optional[smtplib.SMTP] = None
+        # Serialize concurrent senders: a single smtplib.SMTP socket is not
+        # safe to interleave sendmail() calls on. See code review B3.
+        self._send_lock = asyncio.Lock()
 
     def can_send(self) -> bool:
         return bool(self.email_address and self.email_password)
@@ -36,6 +39,28 @@ class EmailSender:
             except Exception:
                 pass
             self._connection = None
+
+    def _html_escape(self, text: str) -> str:
+        """Minimal HTML escaping for embedding LLM output in email bodies.
+
+        The LLM occasionally returns snippets that look like HTML; embedding
+        them raw creates both rendering artifacts and a small XSS surface
+        (the tracking pixel URL is the most worrying vector).
+        """
+        if not text:
+            return ""
+        # Build the entity strings at runtime so the diff tool doesn't
+        # interpret them as HTML and strip them.
+        amp = chr(38) + "amp;"
+        lt = chr(38) + "lt;"
+        gt = chr(38) + "gt;"
+        quot = chr(38) + "quot;"
+        return (
+            text.replace(chr(38), amp)
+                .replace(chr(60), lt)
+                .replace(chr(62), gt)
+                .replace(chr(34), quot)
+        )
 
     async def send_email(self, to_email: str, subject: str, body: str,
                          lead_id: Optional[int] = None,
@@ -60,24 +85,29 @@ class EmailSender:
 
         if lead_id is not None and sequence_id is not None:
             pixel = tracking_pixel_html(lead_id, sequence_id)
-            html_body = body.replace("\n", "<br>\n")
+            html_body = self._html_escape(body).replace("\n", "<br>\n")
             html = f"<html><body>{html_body}{pixel}</body></html>"
             msg.attach(MIMEText(html, "html"))
 
-        try:
-            server = await self._connect()
-            await asyncio.to_thread(
-                server.sendmail,
-                self.email_address,
-                to_email,
-                msg.as_string()
-            )
-            logger.info(f"Email sent to {to_email}")
-            return True
-        except Exception as exc:
-            logger.error(f"Failed to send email: {exc}")
-            self._connection = None
-            return False
+        # Serialize access to the SMTP socket. The lock is reentrant in the
+        # sense that even a single coroutine that retries after a transport
+        # error will not race with another caller.
+        async with self._send_lock:
+            try:
+                server = await self._connect()
+                await asyncio.to_thread(
+                    server.sendmail,
+                    self.email_address,
+                    to_email,
+                    msg.as_string()
+                )
+                logger.info("Email sent", extra={"to": to_email, "lead_id": lead_id})
+                return True
+            except Exception as exc:
+                logger.error("Failed to send email: %s", exc, extra={"to": to_email})
+                # Drop the broken connection so the next call re-handshakes.
+                await self._disconnect()
+                return False
 
     def _smtp_connect(self) -> smtplib.SMTP:
         server = smtplib.SMTP(self.smtp_server, self.smtp_port)

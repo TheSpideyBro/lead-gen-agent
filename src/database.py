@@ -11,7 +11,11 @@ logger = logging.getLogger(__name__)
 
 def get_db_path() -> Path:
     db_path = os.getenv("LEAD_DB_PATH", "data/lead_bot.db")
-    return Path(db_path)
+    p = Path(db_path)
+    # Ensure the parent directory exists so aiosqlite can create the file
+    # on first run, even if .gitkeep has not been committed.
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
 
 
 DB_PATH = get_db_path()
@@ -122,6 +126,11 @@ class LeadDatabase:
             CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(score);
             CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email);
             CREATE INDEX IF NOT EXISTS idx_opens_lead ON email_opens(lead_id);
+            -- Idempotency: a given (lead, channel, step) is queued at most once.
+            -- Two parallel cron invocations used to send the same email twice.
+            -- See code review B7.
+            CREATE UNIQUE INDEX IF NOT EXISTS uniq_seq_lead_channel_step
+                ON sequences(lead_id, channel, step);
         """)
         await self.db.commit()
 
@@ -180,11 +189,27 @@ class LeadDatabase:
         await self.db.commit()
 
     async def schedule_message(self, lead_id: int, channel: str, step: int, scheduled_for: str):
-        await self.db.execute(
-            "INSERT INTO sequences (lead_id, channel, step, scheduled_for) VALUES (?, ?, ?, ?)",
-            (lead_id, channel, step, scheduled_for),
-        )
-        await self.db.commit()
+        # Idempotent: if a (lead, channel, step) row already exists (e.g. the
+        # scheduler ran twice for the same lead), UPDATE its scheduled_for
+        # instead of failing the unique index. See code review B7.
+        try:
+            await self.db.execute(
+                "INSERT INTO sequences (lead_id, channel, step, scheduled_for) "
+                "VALUES (?, ?, ?, ?)",
+                (lead_id, channel, step, scheduled_for),
+            )
+            await self.db.commit()
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "unique" in msg or "constraint" in msg:
+                await self.db.execute(
+                    "UPDATE sequences SET scheduled_for = ? "
+                    "WHERE lead_id = ? AND channel = ? AND step = ?",
+                    (scheduled_for, lead_id, channel, step),
+                )
+                await self.db.commit()
+            else:
+                raise
 
     async def get_lead_by_id(self, lead_id: int) -> dict:
         cursor = await self.db.execute(
@@ -196,21 +221,26 @@ class LeadDatabase:
             return dict(zip(columns, row))
         return {}
 
-    async def get_pending_emails(self):
+    async def get_pending_emails(self, limit: int = 100):
+        # Cap batch size so a backlog doesn't block the event loop. See P7.
         cursor = await self.db.execute(
             "SELECT s.id, s.lead_id, s.step, l.email, l.contact_name, l.company_name "
             "FROM sequences s JOIN leads l ON s.lead_id = l.id "
             "WHERE s.channel = 'email' AND s.sent = 0 "
-            "AND datetime(s.scheduled_for) <= datetime('now')"
+            "AND datetime(s.scheduled_for) <= datetime('now') "
+            "ORDER BY s.scheduled_for ASC LIMIT ?",
+            (limit,),
         )
         return await cursor.fetchall()
 
-    async def get_pending_messages(self):
+    async def get_pending_messages(self, limit: int = 100):
         cursor = await self.db.execute(
             "SELECT s.id, s.lead_id, s.channel, s.step, l.phone, l.contact_name, l.company_name "
             "FROM sequences s JOIN leads l ON s.lead_id = l.id "
             "WHERE s.channel = 'whatsapp' AND s.sent = 0 "
-            "AND datetime(s.scheduled_for) <= datetime('now')"
+            "AND datetime(s.scheduled_for) <= datetime('now') "
+            "ORDER BY s.scheduled_for ASC LIMIT ?",
+            (limit,),
         )
         return await cursor.fetchall()
 

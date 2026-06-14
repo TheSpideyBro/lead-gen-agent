@@ -1,0 +1,15 @@
+# Pinned dependency set for reproducible builds.
+# Generated to be the minimum-bump of requirements.txt. See code review (S11).
+aiohttp==3.9.5
+beautifulsoup4==4.12.3
+lxml==5.2.1
+aiosqlite==0.20.0
+openai==1.30.1
+google-generativeai==0.5.4
+python-dotenv==1.0.1
+fpdf2==2.7.9
+matplotlib==3.8.4
+apscheduler==3.10.4
+playwright==1.44.0
+phonenumbers==8.13.36
+pyflakes==3.2.0

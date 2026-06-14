@@ -20,7 +20,12 @@ def staged_python_files():
 
 
 def main(argv):
-    files = argv[1:] or staged_python_files()
+    raw = argv[1:] or staged_python_files()
+    # In staged mode the helper already filters to *.py. In explicit-argv
+    # mode (e.g. `python scripts/precommit_check.py README.md ...`) we
+    # must do the same ourselves — otherwise py_compile chokes on a UTF-8
+    # em-dash in a Markdown file and we get a spurious SyntaxError.
+    files = [f for f in raw if f.endswith(".py")]
     if not files:
         return 0
 

@@ -1,8 +1,6 @@
 import asyncio
 import json
 import logging
-from datetime import datetime, timedelta
-from typing import Dict, List
 from src.ai_client import AIClient
 from src.outreach.email_sender import EmailSender
 from src.scheduling.timezone_scheduler import TimezoneScheduler
@@ -12,10 +10,30 @@ from src.compliance.compliance_handler import ComplianceHandler
 logger = logging.getLogger(__name__)
 
 
+# Terminal statuses a lead should never be moved out of by booking outreach.
+# Once a lead has qualified, been sent a booking link, or unsubscribed, the
+# booking flow must not clobber that state.  See refactor-agent code review
+# B11.
+_BOOKING_GUARD = {"qualified", "booking_sent", "unsubscribed"}
+
+
 class MessageGenerator:
     def __init__(self, ai_client: AIClient, profile_path: str = "config/agency_profile.json"):
         self.ai = ai_client
         self.profile = self._load_profile(profile_path)
+
+    def _signature(self) -> str:
+        """Render the email signature safely.
+
+        The previous code used str.format() directly, which raised KeyError
+        if the signature contained a literal `{`. We use str.replace() with
+        two positional placeholders instead, and tolerate a missing/empty
+        signature.  See refactor-agent code review (v1.4.0 P1).
+        """
+        template = self.profile.get("email_signature", "") or ""
+        email = self.profile.get("your_email", "") or ""
+        phone = self.profile.get("your_phone", "") or ""
+        return template.replace("{email}", email).replace("{phone}", phone)
 
     def _load_profile(self, path: str) -> dict:
         try:
@@ -62,11 +80,7 @@ class MessageGenerator:
         
         if channel == "email":
             subject = f"Quick question about growing {lead.get('company_name', 'your business')}"
-            signature = self.profile.get('email_signature', '').format(
-                email=self.profile.get('your_email', ''),
-                phone=self.profile.get('your_phone', '')
-            )
-            full_body = f"{body}\n\n{signature}"
+            full_body = f"{body}\n\n{self._signature()}"
             return subject, full_body
         
         return "", body
@@ -96,11 +110,7 @@ class MessageGenerator:
         
         if channel == "email":
             subject = f"Re: {lead.get('company_name', 'your business')} growth opportunity"
-            signature = self.profile.get('email_signature', '').format(
-                email=self.profile.get('your_email', ''),
-                phone=self.profile.get('your_phone', '')
-            )
-            return subject, f"{body}\n\n{signature}"
+            return subject, f"{body}\n\n{self._signature()}"
         
         return "", body
 
@@ -126,13 +136,18 @@ class OutreachSequence:
         "whatsapp": [0, 1, 2],  # immediate, +1d, +2d
     }
 
-    def __init__(self, db, message_gen: MessageGenerator, whatsapp_bot=None):
+    def __init__(self, db, message_gen: MessageGenerator, whatsapp_bot=None, email_sender=None):
         self.db = db
         self.msg_gen = message_gen
         self.whatsapp = whatsapp_bot
+        # GLOBAL additions: timezone-aware scheduling, localization, compliance.
         self.scheduler = TimezoneScheduler()
         self.lang = LangHandler(getattr(message_gen, "ai", None))
         self.compliance = ComplianceHandler(db)
+        # Reuse a single EmailSender across the process so we don't open 30
+        # SMTP connections when 30 hot leads are booked.  See refactor-agent
+        # code review B10.
+        self.email_sender = email_sender or EmailSender()
 
     async def schedule_sequence(self, lead_id: int, channel: str = "email"):
         """Schedule each step in the RECIPIENT's local optimal window.
@@ -140,8 +155,17 @@ class OutreachSequence:
         GLOBAL-specific: resolves the lead's timezone (stored or detected from
         country), then asks TimezoneScheduler for holiday-aware, weekday-aware
         slots instead of blindly adding fixed hours in server time.
+
+        Refactor-agent B11-related fix: only schedule if the lead actually has
+        a contact endpoint for this channel. The pre-global code scheduled an
+        email sequence for a lead with no email and a WhatsApp sequence for a
+        lead with no phone, wasting LLM calls and confusing the daily summary.
         """
         lead = await self.db.get_lead_by_id(lead_id) or {}
+        if channel == "email" and not lead.get("email"):
+            return
+        if channel == "whatsapp" and not lead.get("phone"):
+            return
         country = lead.get("country") or lead.get("location")
         tz_name = lead.get("detected_timezone") or self.scheduler.detect_timezone(country)
         country_code = self.scheduler.country_to_code(country)
@@ -214,12 +238,26 @@ class OutreachSequence:
             return False
         
         lead_id = lead.get("id")
-        
+        if lead_id is None:
+            logger.warning("send_booking_outreach called without a lead id")
+            return False
+
+        # B11 fix: don't downgrade a lead that already qualified / is in
+        # the booking pipeline / has unsubscribed.
+        current = (await self.db.get_lead_by_id(lead_id) or {}).get("status")
+        if current in _BOOKING_GUARD:
+            logger.info(
+                "Skipping booking outreach: lead %s already %s",
+                lead_id, current,
+            )
+            return False
+
         if channel == "email":
             subject = f"Quick 15-min call — {lead.get('company_name', 'your company')}?"
             body = await self._generate_booking_email(lead, calendly_link)
-            sender = EmailSender()
-            success = await sender.send_email(
+            # B10 fix: reuse the singleton EmailSender instead of opening
+            # a fresh SMTP connection per booking outreach.
+            success = await self.email_sender.send_email(
                 lead.get("email"), subject, body, lead_id=lead_id, sequence_id=None
             )
             if success:
@@ -250,11 +288,7 @@ class OutreachSequence:
         
         Sign off professionally."""
         body = await self.msg_gen.ai.generate(user_prompt, system_prompt)
-        signature = self.msg_gen.profile.get('email_signature', '').format(
-            email=self.msg_gen.profile.get('your_email', ''),
-            phone=self.msg_gen.profile.get('your_phone', '')
-        )
-        return f"{body}\n\n{signature}"
+        return f"{body}\n\n{self.msg_gen._signature()}"
 
     async def _generate_booking_whatsapp(self, lead: dict, calendly_link: str) -> str:
         system_prompt = f"You are {self.msg_gen.profile.get('your_name', 'a sales rep')}."

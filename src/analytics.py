@@ -22,10 +22,13 @@ class Analytics:
         
         cursor = await self.db.db.execute("SELECT COUNT(*) FROM leads WHERE status = 'hot'")
         stats["hot_leads"] = (await cursor.fetchone())[0]
-        
+
+        # "qualified" must mean a lead that has actually been qualified
+        # (auto-replied to an interested response, accepted a Calendly slot,
+        # etc.) — not merely a high-scoring tier. See code review B10.
         cursor = await self.db.db.execute("SELECT COUNT(*) FROM leads WHERE status = 'qualified'")
         stats["qualified_leads"] = (await cursor.fetchone())[0]
-        
+
         cursor = await self.db.db.execute("SELECT COUNT(*) FROM leads WHERE status = 'booking_sent'")
         stats["booking_sent_leads"] = (await cursor.fetchone())[0]
         

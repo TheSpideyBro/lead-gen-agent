@@ -1,14 +1,40 @@
-# AGENT_OWNER: analytics-001
-# TASK_ID: 3af35379-03e4-4cf8-9536-263456dac75b
+import asyncio
 import logging
 import os
+import time
+from collections import defaultdict, deque
+from typing import Deque, Dict
 
 from aiohttp import web
 
-from src.tracking.tracker import PIXEL_GIF
+from src.tracking.tracker import PIXEL_GIF, verify_signature
 from src.outreach.email_sender import LeadScorer
 
 logger = logging.getLogger(__name__)
+
+
+# Per-IP sliding-window rate limit for the tracking pixel. Without this an
+# attacker can poison a lead's open count by replaying the URL. See review S1.
+_TRACK_WINDOW_SECONDS = 60
+_TRACK_WINDOW_LIMIT = 10  # 10 requests per minute per IP is plenty for a real client
+
+
+class _IPRateLimiter:
+    def __init__(self) -> None:
+        self._hits: Dict[str, Deque[float]] = defaultdict(deque)
+        self._lock = asyncio.Lock()
+
+    async def allow(self, ip: str) -> bool:
+        now = time.monotonic()
+        async with self._lock:
+            bucket = self._hits[ip]
+            cutoff = now - _TRACK_WINDOW_SECONDS
+            while bucket and bucket[0] < cutoff:
+                bucket.popleft()
+            if len(bucket) >= _TRACK_WINDOW_LIMIT:
+                return False
+            bucket.append(now)
+            return True
 
 
 class TrackingServer:
@@ -18,20 +44,41 @@ class TrackingServer:
         self.port = port
         self.scorer = LeadScorer()
         self._runner = None
+        self._site = None
+        self._limiter = _IPRateLimiter()
 
     async def _handle_pixel(self, request: web.Request) -> web.Response:
         lead_id = self._to_int(request.match_info.get("lead_id"))
         sequence_id = self._to_int(request.match_info.get("sequence_id"))
-        ip = request.headers.get("X-Forwarded-For", request.remote or "")
+        signature = request.query.get("t", "")
+        ip = (request.headers.get("X-Forwarded-For", request.remote or "")).split(",")[0].strip()
+
+        # 1. Reject if the signature doesn't match.  Without this, anyone can
+        #    inflate a lead's open count and bump its score by 15.  See S1.
+        if not lead_id or not sequence_id or not verify_signature(lead_id, sequence_id, signature):
+            # Return 200 + pixel anyway so the *legitimate* image is still
+            # delivered; we simply don't record the open.  This avoids tipping
+            # off spammers that there's a signature they need to forge.
+            return self._pixel_response()
+
+        # 2. Per-IP rate limit (defense in depth).
+        if not await self._limiter.allow(ip):
+            logger.warning("Tracking pixel rate limit hit: ip=%s", ip)
+            return self._pixel_response()
 
         try:
             await self.db.log_email_open(lead_id, sequence_id, ip)
-            if lead_id is not None:
-                await self.scorer.rescore_opened_lead(self.db, lead_id)
-            logger.info(f"Email open: lead={lead_id} sequence={sequence_id} ip={ip}")
+            await self.scorer.rescore_opened_lead(self.db, lead_id)
+            logger.info("Email open: lead=%s sequence=%s ip=%s", lead_id, sequence_id, ip)
         except Exception as exc:
-            logger.error(f"Failed to log email open: {exc}")
+            # Don't echo the IP/lead into a structured log on the same line
+            # as the error; keep them as separate fields.
+            logger.error("Failed to log email open: %s", type(exc).__name__,
+                         extra={"lead_id": lead_id, "sequence_id": sequence_id})
 
+        return self._pixel_response()
+
+    def _pixel_response(self) -> web.Response:
         return web.Response(
             body=PIXEL_GIF,
             content_type="image/gif",
@@ -50,13 +97,23 @@ class TrackingServer:
         app.router.add_get("/track/{lead_id}/{sequence_id}.png", self._handle_pixel)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        site = web.TCPSite(self._runner, self.host, self.port)
-        await site.start()
-        logger.info(f"Tracking server listening on {self.host}:{self.port}")
+        self._site = web.TCPSite(self._runner, self.host, self.port)
+        await self._site.start()
+        logger.info("Tracking server listening on %s:%s", self.host, self.port)
 
     async def stop(self):
-        if self._runner:
-            await self._runner.cleanup()
+        # Shutdown cleanly even if start() raised mid-way.
+        if self._site is not None:
+            try:
+                await self._site.stop()
+            except Exception:
+                pass
+            self._site = None
+        if self._runner is not None:
+            try:
+                await self._runner.cleanup()
+            except Exception:
+                pass
             self._runner = None
 
 
