@@ -2,6 +2,29 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.4.1] - 2026-06-14 — Post-merge cleanup + integration tests
+
+- Dropped **17 unused imports / local variables** flagged by `pyflakes` across
+  `main.py`, `src/analytics.py`, `src/config.py`, `src/database.py`,
+  `src/outreach/email_response_handler.py`, `src/outreach/response_handler.py`,
+  `src/reports/daily_summary.py`, `src/scrapers/prospect_scraper.py`,
+  `src/utils/validators.py`, and `tests/test_regressions.py`.
+- New [`tests/test_integration.py`](tests/test_integration.py) — 9 integration
+  tests that exercise the modules the GLOBAL transformation introduced:
+  - `TestSchemaAndMigration`: a real `LeadDatabase` + `migrate()` round-trip in
+    a temp dir; verifies all 7 GLOBAL columns exist after `migrate()` and
+    that `migrate()` is idempotent.
+  - `TestICPScorerLogic`: signal delta is exactly +25 (not the cap-truncated
+    value), score is capped at 100, tier thresholds are correct.
+  - `TestCompliance`: footer is omitted when the body already contains
+    `unsubscribe`; opt-out detection recognises the 6 common phrases.
+  - `TestProxyParser`: both `ip:port` and `ip:port:user:pass` formats parse,
+    round-robin and credential masking in `performance()` work.
+
+Test count: 4 → 13 (all pass). `pyflakes` warnings: 19 → 0.
+`py_compile`: 0 errors across 35 Python files.
+Module-import smoke test: 31/31 modules load cleanly.
+
 ## [v1.4.0] - 2026-06-13 — Code-review hard pass
 
 A full code review was performed against the v1.3.0 codebase. Every

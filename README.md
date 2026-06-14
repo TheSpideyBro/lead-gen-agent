@@ -36,6 +36,36 @@ Built on `asyncio` for concurrent I/O, with a local SQLite store and pluggable A
 
 ---
 
+## Recent fixes (v1.4.1, 2026-06-14)
+
+Post-merge cleanup of the v1.4.0 branch. No behavioral changes; everything is a
+no-op at runtime.
+
+- **17 unused imports / locals dropped** across 10 files (`main.py`,
+  `src/analytics.py`, `src/config.py`, `src/database.py`,
+  `src/outreach/email_response_handler.py`, `src/outreach/response_handler.py`,
+  `src/reports/daily_summary.py`, `src/scrapers/prospect_scraper.py`,
+  `src/utils/validators.py`, `tests/test_regressions.py`).
+- **9 new integration tests** in [`tests/test_integration.py`](tests/test_integration.py):
+  - `TestSchemaAndMigration` — real `LeadDatabase` + `migrate()` round-trip in a
+    temp dir; verifies all 7 GLOBAL columns exist after `migrate()` and that
+    `migrate()` is idempotent.
+  - `TestICPScorerLogic` — signal delta is exactly +25 (not the cap-truncated
+    value), score is capped at 100, tier thresholds are correct.
+  - `TestCompliance` — footer is omitted when the body already contains
+    `unsubscribe`; opt-out detection recognises the 6 common phrases.
+  - `TestProxyParser` — both `ip:port` and `ip:port:user:pass` formats parse,
+    round-robin and credential masking in `performance()` work.
+
+| Check | Before | After |
+|---|---|---|
+| Test count | 4 | **13** (all pass) |
+| `pyflakes` warnings | 19 | **0** |
+| `py_compile` errors | 0 | **0** (across 35 files) |
+| Module-import smoke test | 31/31 | **31/31** |
+
+---
+
 ## Recent fixes (v1.4.0)
 
 A full code review was performed on 2026-06-13 and every finding was turned
