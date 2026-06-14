@@ -33,6 +33,7 @@ Built on `asyncio` for concurrent I/O, with a local SQLite store and pluggable A
 | **Analytics** | Matplotlib dashboards summarizing pipeline health and outreach activity |
 | **Input Validation** | Email and phone validation, string sanitization to prevent injection attacks |
 | **Rate Limiting** | Built-in rate limiting for API calls and web scraping |
+| **Autonomous Agent** | `agent.py` runs the whole pipeline 24/7 unattended — self-scheduling tasks, reactive reply handling, health monitoring, and WhatsApp remote control. See [Autonomous Mode](#autonomous-mode-agentpy). |
 
 ---
 
@@ -140,6 +141,7 @@ For the full Problem → Fix table and the migration notes, see [`CHANGELOG.md`]
 ```
 lead-gen-agent/
 ├── main.py                       # CLI entry point and menu loop
+├── agent.py                      # Autonomous 24/7 supervisor (scheduler + decision engine + monitor + remote control)
 ├── connect_whatsapp.py           # One-time WhatsApp Web session setup
 ├── requirements.txt
 ├── config/
@@ -223,7 +225,8 @@ python main.py
 | `WHATSAPP_DATA_DIR` | — | WhatsApp session persistence path |
 | `LEAD_DB_PATH` | — | SQLite database path (default: `data/lead_bot.db`) |
 | `TRACKING_BASE_URL` | — | Email open tracking server URL |
-| `OWNER_PHONE` | — | Phone number for daily summary delivery |
+| `OWNER_PHONE` | — | Phone number for daily summary delivery **and autonomous-agent remote control** |
+| `OWNER_TIMEZONE` | — | IANA tz (e.g. `America/New_York`) — gates the agent's daily report + alert quiet-hours (default `UTC`) |
 | `AI_MAX_RETRIES` | — | LLM retry attempts (default `3`) |
 | `WHATSAPP_HEADLESS` | — | Set to `true` for headless browser mode |
 | `LINKEDIN_HEADLESS` | — | Set to `true` for headless browser mode |
@@ -308,6 +311,68 @@ python main.py --report        # refresh the analytics chart
 > Browser-based modes (`--linkedin`, `--whatsapp`) require a persisted Playwright
 > session and won't complete headlessly without prior login. The flags are mutually
 > exclusive — pass one per invocation.
+
+---
+
+## Autonomous Mode (`agent.py`)
+
+While `main.py` runs one action at a time, **`agent.py`** is a long-running
+supervisor that operates the entire pipeline unattended. It *drives the same
+service layer* as the CLI (it reuses `build_components`, `run_prospecting`,
+`run_outreach`), so behaviour stays identical — it just decides *when* to run each
+piece and reacts to inbound replies on its own. Every operation is wrapped so a
+failure degrades one task rather than crashing the process.
+
+```bash
+python agent.py            # live 24/7 loop (prospects + sends for real)
+python agent.py --test     # one dry-run pass of every task, then exit (safe smoke test)
+python agent.py --dry-run  # full loop, but only logs intent — no sends/writes
+python agent.py --status   # print last persisted state + health, then exit (read-only)
+python agent.py --pause    # mark the agent paused in agent_state.json
+python agent.py --resume   # mark the agent running again
+```
+
+> ⚠️ **Live by default.** `python agent.py` with no flags will prospect and send
+> real outreach. Use `--test` / `--dry-run` first to confirm your configuration.
+
+### What it does
+
+- **Self-scheduling tasks** — six recurring jobs with *dynamic cooldowns* that
+  tighten when there's work and back off when idle:
+
+  | Task | Default cadence | Action |
+  |------|-----------------|--------|
+  | `check_replies` | ~2 min (60s–15m) | Poll email + WhatsApp, classify and handle replies |
+  | `send_initial_outreach` | ~5 min (2m–30m) | Send due step-1 messages |
+  | `send_followups` | ~5 min (2m–30m) | Send due follow-up steps |
+  | `prospect_new_leads` | ~1 h (30m–6h) | Discover + score new leads (quota-aware) |
+  | `daily_report` | once/day | Generate the report + DM the owner (at 09:00 owner-local) |
+  | `weekly_cleanup` | weekly | Prune logs + DM a weekly leaderboard |
+
+- **Reactive reply handling** — an 8-way classifier (interested, not&#8209;interested,
+  question, out&#8209;of&#8209;office, unsubscribe, referral/wrong&#8209;person, auto&#8209;reply,
+  neutral) routes each reply to the right action. Idempotent, so it never
+  double-sends.
+- **Self-monitoring** — appends every action to `data/agent_log.jsonl`, records
+  health metrics every 5 minutes, and raises alerts (DM'd to the owner) on
+  stalls, repeated task failures, API quota ≥ 80%, or a reply backlog / dropped
+  WhatsApp session.
+- **Crash recovery** — state is persisted to `data/agent_state.json` every tick;
+  on restart it restores its pause state, task intervals, owner-message cursor,
+  and "daily report already sent" flag. Stops gracefully on `Ctrl+C`.
+
+### Remote control over WhatsApp
+
+Once a WhatsApp session is connected and `OWNER_PHONE` is set, message the bot
+**from the owner number** to steer it (sender is verified; others are ignored):
+
+| Command | Effect |
+|---------|--------|
+| `STATUS` | Reply with current state, queues, and per-task cadence |
+| `PAUSE` / `RESUME` | Suspend / resume all autonomous work (replies still handled) |
+| `REPORT` | Generate and send the pipeline report now |
+| `STOP OUTREACH` | Disable prospecting + sending (replies keep being handled) |
+| `HOT LEADS` | Reply with the top hot leads |
 
 ---
 
