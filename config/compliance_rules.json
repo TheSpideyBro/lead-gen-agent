@@ -1,0 +1,31 @@
+{
+  "_comment": "Per-region sending rules. EU (GDPR): low frequency + mandatory unsubscribe. US (CAN-SPAM): physical address required. default: existing 3-step sequence.",
+  "regions": {
+    "EU": {
+      "countries": ["DE", "FR", "ES", "IT", "NL", "BE", "AT", "IE", "PT", "SE",
+                    "FI", "DK", "PL", "CZ", "GR", "HU", "RO", "BG", "HR", "SK",
+                    "SI", "LT", "LV", "EE", "LU", "CY", "MT"],
+      "max_emails": 1,
+      "period_days": 7,
+      "require_unsubscribe": true,
+      "require_physical_address": true,
+      "notes": "GDPR — minimize frequency, always allow opt-out."
+    },
+    "US": {
+      "countries": ["US"],
+      "max_emails": 3,
+      "period_days": 0,
+      "require_unsubscribe": true,
+      "require_physical_address": true,
+      "notes": "CAN-SPAM — physical address + working opt-out required."
+    },
+    "default": {
+      "countries": [],
+      "max_emails": 3,
+      "period_days": 0,
+      "require_unsubscribe": true,
+      "require_physical_address": false,
+      "notes": "Follow existing 3-step sequence."
+    }
+  }
+}
