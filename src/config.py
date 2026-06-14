@@ -67,6 +67,9 @@ class Settings:
     # WhatsApp ----------------------------------------------------------
     whatsapp_headless: bool = field(default_factory=lambda: _bool("WHATSAPP_HEADLESS", False))
     whatsapp_data_dir: Path = field(default_factory=lambda: Path(_env("WHATSAPP_DATA_DIR", "data/whatsapp")))
+    whatsapp_provider: str = field(default_factory=lambda: _env("WHATSAPP_PROVIDER", "web").lower())
+    whatsapp_api_key: str = field(default_factory=lambda: _env("D360_API_KEY"))
+    whatsapp_phone_id: str = field(default_factory=lambda: _env("D360_PHONE_NUMBER_ID"))
     owner_phone: str = field(default_factory=lambda: _env("OWNER_PHONE"))
 
     # Tracking / DB -----------------------------------------------------
@@ -77,6 +80,14 @@ class Settings:
     # Google Custom Search ---------------------------------------------
     google_api_key: str = field(default_factory=lambda: _env("GOOGLE_API_KEY"))
     google_search_id: str = field(default_factory=lambda: _env("GOOGLE_SEARCH_ID"))
+
+    # GLOBAL mode -------------------------------------------------------
+    outreach_language: str = field(default_factory=lambda: _env("OUTREACH_LANGUAGE", "auto").lower())
+    gdpr_mode: bool = field(default_factory=lambda: _bool("GDPR_MODE", False))
+    apollo_api_key: str = field(default_factory=lambda: _env("APOLLO_API_KEY"))
+    github_token: str = field(default_factory=lambda: _env("GITHUB_TOKEN"))
+    producthunt_token: str = field(default_factory=lambda: _env("PRODUCTHUNT_TOKEN"))
+    proxy_list: str = field(default_factory=lambda: _env("PROXY_LIST"))
 
     @property
     def tracking_port(self) -> int:
