@@ -4,7 +4,7 @@
   "your_email": "saddamhossainakash1100@gmail.com",
   "your_phone": "+8801859892181",
   "your_location": "Bangladesh (Remote Worldwide)",
-  "your_address": "REPLACE WITH YOUR PHYSICAL MAILING ADDRESS (required by CAN-SPAM/GDPR)",
+  "your_address": "Mirpur-10, Dhaka 1216, Bangladesh",
   "target_regions": ["US", "GB", "CA", "AU", "DE", "AE", "SG", "IN"],
   "excluded_regions": [],
   "services": [
@@ -54,7 +54,7 @@
       "In-house marketing not performing"
     ]
   },
-  "email_signature": "Best regards,\nSaddam Hossain Akash\nDigital Marketing Expert | Remote\n📧 {email}\n📱 {phone}\n🌐 www.youragency.com\n\nHelping businesses grow through data-driven digital marketing strategies.",
+  "email_signature": "Best regards,\nSaddam Hossain Akash\nDigital Marketing Expert | Remote\n📧 {email}\n📱 {phone}\n🌐 globaldigitalmarketing.example.com\n\nHelping businesses grow through data-driven digital marketing strategies.",
   "case_studies": [
     {
       "client": "E-commerce Fashion Brand",
