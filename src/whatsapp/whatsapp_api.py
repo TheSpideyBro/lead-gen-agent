@@ -10,6 +10,9 @@ pre-approved. This client is fully functional but inert until D360_API_KEY and
 D360_PHONE_NUMBER_ID are configured. When they aren't, callers fall back to the
 Playwright bot via select_whatsapp_provider().
 """
+import hashlib
+import hmac
+import json
 import logging
 import os
 import re
@@ -35,6 +38,9 @@ class WhatsAppAPI:
         self.phone_number_id = os.getenv("D360_PHONE_NUMBER_ID", "")
         self.base_url = os.getenv("D360_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
         self.calendly_link = os.getenv("CALENDLY_LINK", "")
+        # Webhook auth: set via environment so only Meta-signed requests are accepted.
+        self.webhook_verify_token = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "")
+        self.webhook_signing_secret = os.getenv("WHATSAPP_WEBHOOK_SIGNING_SECRET", "").encode("utf-8")
         self.db = db
         self.ai = ai
         self.usage = APIUsageTracker()
@@ -117,7 +123,7 @@ class WhatsAppAPI:
         """Run a lightweight aiohttp server that receives inbound messages."""
         app = web.Application()
         app.router.add_post("/webhook", self.handle_webhook)
-        app.router.add_get("/webhook", lambda r: web.Response(text="ok"))  # verification
+        app.router.add_get("/webhook", self.handle_verification)  # Meta challenge
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, host, port)
@@ -130,9 +136,42 @@ class WhatsAppAPI:
             await self._webhook_runner.cleanup()
             self._webhook_runner = None
 
+    async def handle_verification(self, request: web.Request) -> web.Response:
+        """Meta webhook subscription challenge (GET).
+
+        Meta sends hub.mode=subscribe, hub.verify_token, hub.challenge. We echo
+        the challenge only if the verify token matches our configured secret.
+        """
+        params = request.rel_url.query
+        mode = params.get("hub.mode")
+        token = params.get("hub.verify_token")
+        challenge = params.get("hub.challenge", "")
+        if mode == "subscribe" and self.webhook_verify_token and \
+                hmac.compare_digest(token or "", self.webhook_verify_token):
+            return web.Response(text=challenge)
+        logger.warning("Webhook verification failed (bad or missing verify token)")
+        return web.Response(status=403, text="forbidden")
+
+    def _verify_signature(self, raw_body: bytes, signature_header: str) -> bool:
+        """Verify the X-Hub-Signature-256 HMAC over the raw request body."""
+        if not self.webhook_signing_secret:
+            # No secret configured: reject by default rather than accept unsigned.
+            logger.error("WHATSAPP_WEBHOOK_SIGNING_SECRET not set — rejecting webhook")
+            return False
+        if not signature_header or not signature_header.startswith("sha256="):
+            return False
+        expected = hmac.new(self.webhook_signing_secret, raw_body, hashlib.sha256).hexdigest()
+        received = signature_header.split("=", 1)[1]
+        return hmac.compare_digest(expected, received)
+
     async def handle_webhook(self, request: web.Request) -> web.Response:
+        raw_body = await request.read()
+        signature = request.headers.get("X-Hub-Signature-256", "")
+        if not self._verify_signature(raw_body, signature):
+            logger.warning("Webhook signature verification failed — rejecting")
+            return web.Response(status=401, text="unauthorized")
         try:
-            data = await request.json()
+            data = json.loads(raw_body)
         except Exception:
             return web.Response(status=400, text="bad json")
 

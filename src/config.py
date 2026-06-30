@@ -67,14 +67,15 @@ class Settings:
     # WhatsApp ----------------------------------------------------------
     whatsapp_headless: bool = field(default_factory=lambda: _bool("WHATSAPP_HEADLESS", False))
     whatsapp_data_dir: Path = field(default_factory=lambda: Path(_env("WHATSAPP_DATA_DIR", "data/whatsapp")))
-    whatsapp_provider: str = field(default_factory=lambda: _env("WHATSAPP_PROVIDER", "web").lower())
+    whatsapp_webhook_verify_token: str = field(default_factory=lambda: _env("WHATSAPP_WEBHOOK_VERIFY_TOKEN"))
+    whatsapp_webhook_signing_secret: str = field(default_factory=lambda: _env("WHATSAPP_WEBHOOK_SIGNING_SECRET"))
     whatsapp_api_key: str = field(default_factory=lambda: _env("D360_API_KEY"))
     whatsapp_phone_id: str = field(default_factory=lambda: _env("D360_PHONE_NUMBER_ID"))
     owner_phone: str = field(default_factory=lambda: _env("OWNER_PHONE"))
 
     # Tracking / DB -----------------------------------------------------
     tracking_base_url: str = field(default_factory=lambda: _env("TRACKING_BASE_URL", "http://localhost:8080"))
-    tracking_secret: str = field(default_factory=lambda: _env("TRACKING_SECRET", "change-me"))
+    tracking_secret: str = field(default_factory=lambda: _env("TRACKING_SECRET", required=True))
     lead_db_path: Path = field(default_factory=lambda: Path(_env("LEAD_DB_PATH", "data/lead_bot.db")))
 
     # Google Custom Search ---------------------------------------------

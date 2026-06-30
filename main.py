@@ -4,7 +4,7 @@ import logging
 import os
 import sys
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -282,7 +282,9 @@ async def schedule_daily_summary(db, whatsapp):
         now = datetime.now()
         target = now.replace(hour=9, minute=0, second=0, microsecond=0)
         if now >= target:
-            target = target.replace(day=target.day + 1)
+            # timedelta handles month/year rollover; target.replace(day=day+1)
+            # crashes on the last day of a month (e.g. day=31 in June).
+            target = target + timedelta(days=1)
         wait_seconds = (target - now).total_seconds()
         await asyncio.sleep(wait_seconds)
         await send_daily_summary(db, whatsapp)
@@ -381,7 +383,17 @@ async def main_loop():
 
     show_whatsapp_menu = False
     
-    asyncio.create_task(schedule_daily_summary(db, whatsapp))
+    # Track background tasks for graceful shutdown.
+    _background_tasks: set[asyncio.Task] = set()
+
+    def _spawn(task_coro, *, name=None):
+        """Spawn a background task and track it for cancellation on exit."""
+        t = asyncio.create_task(task_coro, name=name)
+        _background_tasks.add(t)
+        t.add_done_callback(_background_tasks.discard)
+        return t
+
+    _spawn(schedule_daily_summary(db, whatsapp), name="schedule_daily_summary")
 
     for line in global_status_lines(c["usage"]):
         print(line)
@@ -469,6 +481,9 @@ async def main_loop():
                 await view_booking_pipeline(db)
             
             elif choice == "14":
+                for t in _background_tasks:
+                    t.cancel()
+                await asyncio.gather(*_background_tasks, return_exceptions=True)
                 await tracking_server.stop()
                 await c["email_sender"].close()
                 await db.close()

@@ -180,6 +180,37 @@ class LeadDatabase:
         )
         await self.db.commit()
 
+    async def claim_sequence_for_send(self, sequence_id: int) -> bool:
+        """Atomically claim a sequence row for sending.
+
+        Returns True if the row was claimed (sent=0 -> sent=1), False if it was
+        already claimed by another process.  This prevents duplicate sends when
+        multiple cron invocations or processes run concurrently.  See code
+        review B3/B4.
+        """
+        cursor = await self.db.execute(
+            "UPDATE sequences SET sent = 1 WHERE id = ? AND sent = 0",
+            (sequence_id,),
+        )
+        await self.db.commit()
+        return cursor.rowcount > 0
+
+    async def log_outreach_and_mark_sent(self, lead_id: int, channel: str, subject: str, body: str, sequence_id: int):
+        """Log an outreach send and mark the sequence row as sent, all in one transaction.
+
+        This is the atomic counterpart to the two-step log_outreach + mark_email_sent
+        that existed before.  See code review B2.
+        """
+        async with self.db:
+            await self.db.execute(
+                "INSERT INTO outreach (lead_id, channel, subject, body) VALUES (?, ?, ?, ?)",
+                (lead_id, channel, subject, body),
+            )
+            await self.db.execute(
+                "UPDATE sequences SET sent = 1 WHERE id = ?",
+                (sequence_id,),
+            )
+
     async def log_response(self, lead_id: int, response_type: str, content: str):
         await self.db.execute(
             "INSERT INTO responses (lead_id, response_type, content) VALUES (?, ?, ?)",
