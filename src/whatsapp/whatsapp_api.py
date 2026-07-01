@@ -21,6 +21,7 @@ from typing import List, Optional
 import aiohttp
 from aiohttp import web
 
+from src.utils.validators import normalize_phone
 from src.utils.api_usage import APIUsageTracker
 
 logger = logging.getLogger(__name__)
@@ -177,25 +178,32 @@ class WhatsAppAPI:
 
         for msg in self._extract_messages(data):
             try:
-                await self._process_incoming(msg["from"], msg["text"])
+                await self._process_incoming(msg["from"], msg["text"], msg.get("message_id", ""))
             except Exception as exc:
                 logger.error("webhook processing error: %s", exc)
         return web.Response(text="ok")
 
     @staticmethod
     def _extract_messages(data: dict) -> List[dict]:
-        """Pull (from, text) pairs out of the WhatsApp Cloud webhook shape."""
+        """Pull (from, text, message_id) triples out of the WhatsApp Cloud webhook shape."""
         out = []
         for entry in data.get("entry", []):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
                 for m in value.get("messages", []):
                     text = (m.get("text") or {}).get("body", "")
+                    msg_id = m.get("id", "")
                     if m.get("from") and text:
-                        out.append({"from": m["from"], "text": text})
+                        out.append({"from": m["from"], "text": text, "message_id": msg_id})
         return out
 
-    async def _process_incoming(self, phone: str, text: str):
+    async def _process_incoming(self, phone: str, text: str, message_id: str = ""):
+        # Idempotency: Meta may retry the same webhook delivery.
+        # Skip if we've already processed this message.id.
+        if message_id and self.db:
+            if await self.db.is_seen_message_id(message_id):
+                logger.debug("Duplicate webhook message_id=%s — skipping", message_id)
+                return
         classification = await self._classify(text)
         lead_id = await self._lead_id_by_phone(phone)
         await self._store_response(lead_id, phone, text, classification)
@@ -238,17 +246,20 @@ class WhatsAppAPI:
     async def _lead_id_by_phone(self, phone: str) -> Optional[int]:
         if not self.db:
             return None
+        norm = normalize_phone(phone)
+        if not norm:
+            return None
         cursor = await self.db.db.execute(
-            "SELECT id FROM leads WHERE phone LIKE ? LIMIT 1", (f"%{phone[-9:]}%",))
+            "SELECT id FROM leads WHERE phone_normalized = ? LIMIT 1", (norm,))
         row = await cursor.fetchone()
         return row[0] if row else None
 
-    async def _store_response(self, lead_id, phone, body, classification):
+    async def _store_response(self, lead_id, phone, body, classification, message_id=""):
         if not self.db:
             return
         await self.db.db.execute(
-            "INSERT INTO whatsapp_responses (lead_id, phone, body, classification) "
-            "VALUES (?, ?, ?, ?)", (lead_id, phone, body, classification))
+            "INSERT INTO whatsapp_responses (lead_id, phone, body, classification, message_id) "
+            "VALUES (?, ?, ?, ?, ?)", (lead_id, phone, body, classification, message_id or None))
         await self.db.db.commit()
 
     async def close(self):

@@ -74,9 +74,24 @@ class ComplianceHandler:
                 "reply STOP and we will erase your data and never contact you again.")
         return "\n".join(lines)
 
+    # Patterns that indicate a proper opt-out footer is already present.
+    # We check for these instead of a bare substring to avoid skipping the
+    # footer when the word "unsubscribe" happens to appear in the body prose.
+    FOOTER_PATTERNS = (
+        "reply stop to unsubscribe",
+        "unsubscribe link",
+        "privacy policy",
+        "opt-out",
+        "can't reach you",
+        "mailchimp",       # common ESP footers
+        "sendgrid",
+        "postmark",
+    )
+
     def ensure_email_compliant(self, body: str, country_code: Optional[str] = None) -> str:
         """Append the compliant footer unless one is already present."""
-        if "unsubscribe" in (body or "").lower():
+        lower_body = (body or "").lower()
+        if any(pat in lower_body for pat in self.FOOTER_PATTERNS):
             return body
         return f"{body}\n{self.build_footer(country_code)}"
 

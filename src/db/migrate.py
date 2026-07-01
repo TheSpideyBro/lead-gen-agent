@@ -24,6 +24,7 @@ NEW_LEAD_COLUMNS = {
     "email_verified": "INTEGER DEFAULT 0",
     "region": "TEXT",
     "funding_stage": "TEXT",
+    "phone_normalized": "TEXT",
 }
 
 GLOBAL_UNSUBSCRIBE_DDL = """

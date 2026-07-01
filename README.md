@@ -6,6 +6,7 @@
   <img src="https://img.shields.io/badge/python-3.11+-blue.svg" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/async-asyncio-green.svg" alt="Asyncio">
   <img src="https://img.shields.io/badge/AI-Groq%20%7C%20Gemini-orange.svg" alt="AI Providers">
+  <img src="https://img.shields.io/badge/tests-13-passing-brightgreen.svg" alt="Tests">
   <img src="https://img.shields.io/badge/license-MIT-lightgrey.svg" alt="License MIT">
 </p>
 
@@ -34,6 +35,31 @@ Built on `asyncio` for concurrent I/O, with a local SQLite store and pluggable A
 | **Input Validation** | Email and phone validation, string sanitization to prevent injection attacks |
 | **Rate Limiting** | Built-in rate limiting for API calls and web scraping |
 | **Autonomous Agent** | `agent.py` runs the whole pipeline 24/7 unattended — self-scheduling tasks, reactive reply handling, health monitoring, and WhatsApp remote control. See [Autonomous Mode](#autonomous-mode-agentpy). |
+
+---
+
+## Recent fixes (v1.5.0, 2026-07-01) — Phase 2 Bug Fixes
+
+| # | Problem | Fix |
+|---|---------|-----|
+| 2.1 | **Phone LIKE query routed replies to the wrong lead.** `_lead_id_by_phone()` matched on `LIKE '%last9digits%'`, so two leads sharing a suffix collided. | Added `normalize_phone()` (strips non-digits, handles `00` intl prefix) and `phone_normalized` column. Lookups now use exact equality on the normalized form. |
+| 2.2 | **Footer skipped when body prose contained "unsubscribe".** `ensure_email_compliant()` checked a bare substring, so a legitimate email body mentioning "unsubscribe" prevented the compliant footer from being added. | Now checks for specific footer patterns (`"reply stop to unsubscribe"`, `"unsubscribe link"`, `"privacy policy"`, ESP markers like Mailchimp/SendGrid). |
+| 2.3 | **Holiday JSON format dependency.** `_is_holiday()` assumed every entry was an ISO date string; silently missed holidays stored as dicts, integers, or alternative formats. | Parses ISO strings, `date`/`datetime` objects, `YYYYMMDD` integers, `DD/MM/YYYY` strings, and `{"date": ..., "name": ...}` dicts. |
+| 2.4 | **Sequential email enrichment — 20 leads = 20 HTTP round trips.** `_enrich_leads()` and ProductHunt email fetching were purely sequential. | `asyncio.gather` with `Semaphore(5)` caps concurrency at 5 parallel requests. |
+| 2.5 | **Webhook duplicate replies.** Meta may retry the same webhook delivery; no idempotency guard existed. | `whatsapp_responses.message_id TEXT UNIQUE` column + `is_seen_message_id()` check before processing. Duplicate `message.id` → skip. |
+
+---
+
+## Recent fixes (v1.4.2, 2026-07-01) — Phase 1 Critical Fixes
+
+| # | Problem | Fix |
+|---|---------|-----|
+| 1.1 | **Tracking secret defaulted to `"change-me"`** — anyone could forge valid tracking pixel URLs. | `TRACKING_SECRET` is now required at startup; raises `RuntimeError` if unset. |
+| 1.2 | **Non-atomic `log_outreach` + `mark_email_sent`** — a crash between the two steps left orphan rows. | New `log_outreach_and_mark_sent()` does INSERT + UPDATE in one transaction. |
+| 1.3 | **Inter-process send race** — multiple cron processes could pick the same sequence row. | Atomic `claim_sequence_for_send()` (`UPDATE ... WHERE sent=0`); send only if `rowcount==1`. |
+| 1.4 | **WhatsApp webhook had no authentication** — anyone could inject fake messages. | GET challenge verifies `hub.verify_token`; POST verifies `X-Hub-Signature-256` HMAC. |
+| 1.5 | **Orphan `schedule_daily_summary` task** leaked on exit; month-end crash (`target.day + 1`). | Task tracked in `_background_tasks` set and cancelled on exit; `timedelta(days=1)` for safe date math. |
+| 1.6 | **Global `_last_call_time` serialized all AI clients** through one lock. | Rate-limit state moved to instance attributes — each `AIClient` is independent. |
 
 ---
 
@@ -151,9 +177,12 @@ lead-gen-agent/
 │   ├── database.py               # Async SQLite (aiosqlite) data layer
 │   ├── ai_client.py              # Multi-provider LLM client (Groq / Gemini)
 │   ├── analytics.py              # Stats + matplotlib reporting
+│   ├── config.py                 # Typed Settings dataclass + env loading
+│   ├── logging_setup.py          # JSON/console formatter, rotating file handler
 │   ├── utils/
-│   │   ├── validators.py         # Input validation and sanitization
-│   │   └── rate_limiter.py       # Rate limiting and retry utilities
+│   │   ├── validators.py         # Input validation, sanitization, phone normalization
+│   │   ├── rate_limiter.py       # Rate limiting and retry utilities
+│   │   └── api_usage.py          # Per-source daily quota tracking
 │   ├── scrapers/
 │   │   ├── prospect_scraper.py   # DuckDuckGo / Google search + email extraction
 │   │   └── linkedin_scraper.py   # Playwright LinkedIn / Sales Navigator scraper
@@ -162,11 +191,13 @@ lead-gen-agent/
 │   │   ├── email_generator.py    # AI message generation + sequence scheduler + booking outreach
 │   │   └── email_response_handler.py  # IMAP polling + AI reply classification
 │   ├── tracking/
-│   │   ├── tracker.py            # Email open tracking pixel
+│   │   ├── tracker.py            # Email open tracking pixel (HMAC-signed URLs)
 │   │   └── server.py             # aiohttp tracking server
 │   ├── reports/
 │   │   └── daily_summary.py      # Daily stats aggregation
 │   └── whatsapp_bot.py           # Playwright WhatsApp Web automation
+├── src/whatsapp/
+│   └── whatsapp_api.py           # 360dialog WhatsApp Business API client + webhook (HMAC auth)
 └── data/                         # SQLite DB + browser sessions (gitignored)
 ```
 

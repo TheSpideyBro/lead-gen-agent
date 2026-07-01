@@ -3,7 +3,7 @@ import logging
 import os
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional
+from src.utils.validators import normalize_phone
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,7 @@ class LeadDatabase:
                 location TEXT,
                 employees INTEGER,
                 source TEXT,
+                phone_normalized TEXT,
                 score INTEGER DEFAULT 0,
                 status TEXT DEFAULT 'new',
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -100,7 +101,8 @@ class LeadDatabase:
                 phone TEXT,
                 received_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 body TEXT,
-                classification TEXT
+                classification TEXT,
+                message_id TEXT UNIQUE  -- Meta message id for dedup
             );
 
             CREATE TABLE IF NOT EXISTS email_opens (
@@ -125,6 +127,7 @@ class LeadDatabase:
             CREATE INDEX IF NOT EXISTS idx_leads_score ON leads(score);
             CREATE INDEX IF NOT EXISTS idx_leads_email ON leads(email);
             CREATE INDEX IF NOT EXISTS idx_opens_lead ON email_opens(lead_id);
+            CREATE INDEX IF NOT EXISTS idx_wa_resp_msg ON whatsapp_responses(message_id);
             -- Idempotency: a given (lead, channel, step) is queued at most once.
             -- Two parallel cron invocations used to send the same email twice.
             -- See code review B7.
@@ -135,9 +138,10 @@ class LeadDatabase:
 
     async def add_lead(self, lead_data: dict) -> int:
         cursor = await self.db.execute(
-            """INSERT INTO leads (company_name, contact_name, contact_title, email, phone, 
-                                 website, industry, location, employees, source, score)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO leads (company_name, contact_name, contact_title, email, phone,
+                                 website, industry, location, employees, source,
+                                 phone_normalized, score)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 lead_data.get("company_name"),
                 lead_data.get("contact_name"),
@@ -149,6 +153,7 @@ class LeadDatabase:
                 lead_data.get("location"),
                 lead_data.get("employees"),
                 lead_data.get("source"),
+                normalize_phone(lead_data.get("phone")),
                 lead_data.get("score", 0),
             ),
         )
@@ -285,6 +290,16 @@ class LeadDatabase:
             "UPDATE sequences SET sent = 1 WHERE id = ?", (sequence_id,)
         )
         await self.db.commit()
+
+    async def is_seen_message_id(self, message_id: str) -> bool:
+        """Return True if this Meta message.id was already processed."""
+        if not message_id:
+            return False
+        cursor = await self.db.execute(
+            "SELECT 1 FROM whatsapp_responses WHERE message_id = ? LIMIT 1",
+            (message_id,),
+        )
+        return (await cursor.fetchone()) is not None
 
     async def get_all_leads_with_email(self):
         cursor = await self.db.execute(

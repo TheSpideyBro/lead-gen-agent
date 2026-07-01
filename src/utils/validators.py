@@ -21,6 +21,23 @@ def validate_phone(phone: str) -> bool:
     return 7 <= len(digits) <= 15
 
 
+def normalize_phone(phone: str) -> str:
+    """Reduce a phone string to a canonical digits-only form for matching.
+
+    Strips all non-digit characters (spaces, dashes, parens, leading '+'),
+    and drops a single leading international-dialing '00' prefix so that
+    '+1 (555) 555-0100', '0015555550100' and '15555550100' all compare equal.
+    Returns '' for falsy/garbage input. Use this for BOTH storage and lookup
+    so equality holds instead of a fuzzy LIKE suffix match.
+    """
+    if not phone:
+        return ""
+    digits = ''.join(c for c in str(phone) if c.isdigit())
+    if digits.startswith("00"):
+        digits = digits[2:]
+    return digits
+
+
 def validate_url(url: str) -> bool:
     if not url:
         return False
