@@ -1,3 +1,0 @@
-@echo off
-echo Starting Lead Generation Agent...
-python main.py

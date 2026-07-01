@@ -1,26 +1,62 @@
-# Secrets
+# Environment & secrets
 .env
+.env.local
+.env.*.local
 
-# Runtime data (SQLite DB, browser sessions)
-data/
-!data/.gitkeep
+# Virtual environments
+venv/
+env/
+.venv/
+ENV/
 
 # Python
 __pycache__/
-*.pyc
-venv/
+*.py[cod]
+*$py.class
+*.so
 *.egg-info/
+*.egg
+dist/
+build/
+out/
+*.tar.gz
+*.whl
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.tox/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Runtime data
+data/
+!data/.gitkeep
 
 # Output
 output/
 *.log
 
-# OS
-.DS_Store
-Thumbs.db
+# Browser sessions (Playwright)
+data/whatsapp/
+data/linkedin/
 
-# Local handoff doc (not version-controlled)
-handoff.md
-
-# Per-agent isolated workspaces (git worktrees live here)
+# Per-agent isolated workspaces (git worktrees)
 worktrees/
+
+# Local handoff doc (internal use only)
+handoff.md
