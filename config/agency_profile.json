@@ -1,11 +1,12 @@
 {
-  "agency_name": "Global Digital Marketing Solutions",
-  "your_name": "Saddam Hossain Akash",
-  "your_email": "saddamhossainakash1100@gmail.com",
-  "your_phone": "+8801859892181",
-  "your_location": "Bangladesh (Remote Worldwide)",
-  "your_address": "Mirpur-10, Dhaka 1216, Bangladesh",
-  "target_regions": ["US", "GB", "CA", "AU", "DE", "AE", "SG", "IN"],
+  "_comment": "Agency profile for AI-generated outreach copy. Replace placeholders with your own data before use.",
+  "agency_name": "Your Agency Name",
+  "your_name": "Your Name",
+  "your_email": "you@yourdomain.com",
+  "your_phone": "+1234567890",
+  "your_location": "Remote Worldwide",
+  "your_address": "123 Business St, City, State, ZIP, Country",
+  "target_regions": ["US", "GB", "CA", "AU", "DE", "AE", "SG"],
   "excluded_regions": [],
   "services": [
     "SEO & Local SEO",
@@ -54,7 +55,7 @@
       "In-house marketing not performing"
     ]
   },
-  "email_signature": "Best regards,\nSaddam Hossain Akash\nDigital Marketing Expert | Remote\n📧 {email}\n📱 {phone}\n🌐 globaldigitalmarketing.example.com\n\nHelping businesses grow through data-driven digital marketing strategies.",
+  "email_signature": "Best regards,\n{your_name}\nDigital Marketing Expert | Remote\n✉️ {your_email}\n📞 {your_phone}\n\nHelping businesses grow through data-driven digital marketing strategies.",
   "case_studies": [
     {
       "client": "E-commerce Fashion Brand",

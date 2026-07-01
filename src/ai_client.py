@@ -7,23 +7,17 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-_last_call_time: float = 0
-_min_call_interval: float = 1.0
-_rate_limit_lock: Optional[asyncio.Lock] = None
-
-
-def _get_rate_limit_lock() -> asyncio.Lock:
-    global _rate_limit_lock
-    if _rate_limit_lock is None:
-        _rate_limit_lock = asyncio.Lock()
-    return _rate_limit_lock
-
 
 class AIClient:
+    # Minimum seconds between AI calls from a single client instance.
+    _MIN_CALL_INTERVAL: float = 1.0
+
     def __init__(self):
         self.provider = self._detect_provider()
         self._client = None
         self._init_client()
+        self._last_call_time: float = 0.0
+        self._rate_limit_lock: asyncio.Lock = asyncio.Lock()
 
     def _detect_provider(self) -> str:
         if os.getenv("GROQ_API_KEY"):
@@ -55,15 +49,14 @@ class AIClient:
                 logger.error("Install: pip install google-generativeai")
 
     async def generate(self, prompt: str, system_prompt: str = "You are a helpful assistant.") -> str:
-        global _last_call_time
         if self.provider == "none":
             return "[AI disabled — set API key in .env]"
 
-        async with _get_rate_limit_lock():
-            elapsed = time.time() - _last_call_time
-            if elapsed < _min_call_interval:
-                await asyncio.sleep(_min_call_interval - elapsed)
-            _last_call_time = time.time()
+        async with self._rate_limit_lock:
+            elapsed = time.time() - self._last_call_time
+            if elapsed < self._MIN_CALL_INTERVAL:
+                await asyncio.sleep(self._MIN_CALL_INTERVAL - elapsed)
+            self._last_call_time = time.time()
 
         max_attempts = int(os.getenv("AI_MAX_RETRIES", "3"))
         for attempt in range(max_attempts):

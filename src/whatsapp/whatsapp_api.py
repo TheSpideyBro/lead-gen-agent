@@ -10,6 +10,9 @@ pre-approved. This client is fully functional but inert until D360_API_KEY and
 D360_PHONE_NUMBER_ID are configured. When they aren't, callers fall back to the
 Playwright bot via select_whatsapp_provider().
 """
+import hashlib
+import hmac
+import json
 import logging
 import os
 import re
@@ -18,6 +21,7 @@ from typing import List, Optional
 import aiohttp
 from aiohttp import web
 
+from src.utils.validators import normalize_phone
 from src.utils.api_usage import APIUsageTracker
 
 logger = logging.getLogger(__name__)
@@ -35,6 +39,9 @@ class WhatsAppAPI:
         self.phone_number_id = os.getenv("D360_PHONE_NUMBER_ID", "")
         self.base_url = os.getenv("D360_BASE_URL", DEFAULT_BASE_URL).rstrip("/")
         self.calendly_link = os.getenv("CALENDLY_LINK", "")
+        # Webhook auth: set via environment so only Meta-signed requests are accepted.
+        self.webhook_verify_token = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "")
+        self.webhook_signing_secret = os.getenv("WHATSAPP_WEBHOOK_SIGNING_SECRET", "").encode("utf-8")
         self.db = db
         self.ai = ai
         self.usage = APIUsageTracker()
@@ -117,7 +124,7 @@ class WhatsAppAPI:
         """Run a lightweight aiohttp server that receives inbound messages."""
         app = web.Application()
         app.router.add_post("/webhook", self.handle_webhook)
-        app.router.add_get("/webhook", lambda r: web.Response(text="ok"))  # verification
+        app.router.add_get("/webhook", self.handle_verification)  # Meta challenge
         runner = web.AppRunner(app)
         await runner.setup()
         site = web.TCPSite(runner, host, port)
@@ -130,33 +137,73 @@ class WhatsAppAPI:
             await self._webhook_runner.cleanup()
             self._webhook_runner = None
 
+    async def handle_verification(self, request: web.Request) -> web.Response:
+        """Meta webhook subscription challenge (GET).
+
+        Meta sends hub.mode=subscribe, hub.verify_token, hub.challenge. We echo
+        the challenge only if the verify token matches our configured secret.
+        """
+        params = request.rel_url.query
+        mode = params.get("hub.mode")
+        token = params.get("hub.verify_token")
+        challenge = params.get("hub.challenge", "")
+        if mode == "subscribe" and self.webhook_verify_token and \
+                hmac.compare_digest(token or "", self.webhook_verify_token):
+            return web.Response(text=challenge)
+        logger.warning("Webhook verification failed (bad or missing verify token)")
+        return web.Response(status=403, text="forbidden")
+
+    def _verify_signature(self, raw_body: bytes, signature_header: str) -> bool:
+        """Verify the X-Hub-Signature-256 HMAC over the raw request body."""
+        if not self.webhook_signing_secret:
+            # No secret configured: reject by default rather than accept unsigned.
+            logger.error("WHATSAPP_WEBHOOK_SIGNING_SECRET not set — rejecting webhook")
+            return False
+        if not signature_header or not signature_header.startswith("sha256="):
+            return False
+        expected = hmac.new(self.webhook_signing_secret, raw_body, hashlib.sha256).hexdigest()
+        received = signature_header.split("=", 1)[1]
+        return hmac.compare_digest(expected, received)
+
     async def handle_webhook(self, request: web.Request) -> web.Response:
+        raw_body = await request.read()
+        signature = request.headers.get("X-Hub-Signature-256", "")
+        if not self._verify_signature(raw_body, signature):
+            logger.warning("Webhook signature verification failed — rejecting")
+            return web.Response(status=401, text="unauthorized")
         try:
-            data = await request.json()
+            data = json.loads(raw_body)
         except Exception:
             return web.Response(status=400, text="bad json")
 
         for msg in self._extract_messages(data):
             try:
-                await self._process_incoming(msg["from"], msg["text"])
+                await self._process_incoming(msg["from"], msg["text"], msg.get("message_id", ""))
             except Exception as exc:
                 logger.error("webhook processing error: %s", exc)
         return web.Response(text="ok")
 
     @staticmethod
     def _extract_messages(data: dict) -> List[dict]:
-        """Pull (from, text) pairs out of the WhatsApp Cloud webhook shape."""
+        """Pull (from, text, message_id) triples out of the WhatsApp Cloud webhook shape."""
         out = []
         for entry in data.get("entry", []):
             for change in entry.get("changes", []):
                 value = change.get("value", {})
                 for m in value.get("messages", []):
                     text = (m.get("text") or {}).get("body", "")
+                    msg_id = m.get("id", "")
                     if m.get("from") and text:
-                        out.append({"from": m["from"], "text": text})
+                        out.append({"from": m["from"], "text": text, "message_id": msg_id})
         return out
 
-    async def _process_incoming(self, phone: str, text: str):
+    async def _process_incoming(self, phone: str, text: str, message_id: str = ""):
+        # Idempotency: Meta may retry the same webhook delivery.
+        # Skip if we've already processed this message.id.
+        if message_id and self.db:
+            if await self.db.is_seen_message_id(message_id):
+                logger.debug("Duplicate webhook message_id=%s — skipping", message_id)
+                return
         classification = await self._classify(text)
         lead_id = await self._lead_id_by_phone(phone)
         await self._store_response(lead_id, phone, text, classification)
@@ -199,17 +246,20 @@ class WhatsAppAPI:
     async def _lead_id_by_phone(self, phone: str) -> Optional[int]:
         if not self.db:
             return None
+        norm = normalize_phone(phone)
+        if not norm:
+            return None
         cursor = await self.db.db.execute(
-            "SELECT id FROM leads WHERE phone LIKE ? LIMIT 1", (f"%{phone[-9:]}%",))
+            "SELECT id FROM leads WHERE phone_normalized = ? LIMIT 1", (norm,))
         row = await cursor.fetchone()
         return row[0] if row else None
 
-    async def _store_response(self, lead_id, phone, body, classification):
+    async def _store_response(self, lead_id, phone, body, classification, message_id=""):
         if not self.db:
             return
         await self.db.db.execute(
-            "INSERT INTO whatsapp_responses (lead_id, phone, body, classification) "
-            "VALUES (?, ?, ?, ?)", (lead_id, phone, body, classification))
+            "INSERT INTO whatsapp_responses (lead_id, phone, body, classification, message_id) "
+            "VALUES (?, ?, ?, ?, ?)", (lead_id, phone, body, classification, message_id or None))
         await self.db.db.commit()
 
     async def close(self):

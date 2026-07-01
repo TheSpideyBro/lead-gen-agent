@@ -195,12 +195,23 @@ class OutreachSequence:
             body, _ = await self.lang.localize(body, country)
             # Append compliant footer (physical address + opt-out + GDPR notice).
             body = self.compliance.ensure_email_compliant(body, country_code)
-            await sender.send_email(email, subject, body, lead_id=lead_id, sequence_id=seq_id)
-            self.compliance.log_send("email", email, lead_id,
-                                     self.compliance.region_for_country(country_code))
-            await self.db.log_outreach(lead_id, "email", subject, body)
-            await self.db.mark_email_sent(seq_id)
-            sent_count += 1
+            # B3: atomic claim — if another process stole this row, skip it.
+            if not await self.db.claim_sequence_for_send(seq_id):
+                logger.debug("Sequence %d already claimed by another process", seq_id)
+                continue
+            try:
+                await sender.send_email(email, subject, body, lead_id=lead_id, sequence_id=seq_id)
+                self.compliance.log_send("email", email, lead_id,
+                                         self.compliance.region_for_country(country_code))
+                # B2: atomic log + mark in one transaction.
+                await self.db.log_outreach_and_mark_sent(lead_id, "email", subject, body, seq_id)
+                sent_count += 1
+            except Exception as exc:
+                # Send failed — undo the claim so another process can retry.
+                logger.error("Email send failed for seq %d: %s — resetting claim", seq_id, exc)
+                await self.db.db.execute(
+                    "UPDATE sequences SET sent = 0 WHERE id = ?", (seq_id,))
+                await self.db.db.commit()
             await asyncio.sleep(2)  # Rate limit
         return sent_count
 

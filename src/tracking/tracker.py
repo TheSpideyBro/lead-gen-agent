@@ -19,7 +19,12 @@ def _sign(lead_id: int, sequence_id: int) -> str:
     Without this, an attacker can inflate a lead's open count by hitting
     the pixel URL directly.  See code review S1.
     """
-    secret = os.getenv("TRACKING_SECRET", "change-me").encode("utf-8")
+    secret = os.getenv("TRACKING_SECRET").encode("utf-8")
+    if not secret:
+        raise RuntimeError(
+            "TRACKING_SECRET is not set. Copy .env.example to .env "
+            "and set TRACKING_SECRET=<a-long-random-string>."
+        )
     msg = f"{lead_id}:{sequence_id}".encode("utf-8")
     return hmac.new(secret, msg, hashlib.sha256).hexdigest()[:16]
 

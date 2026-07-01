@@ -117,9 +117,49 @@ class TimezoneScheduler:
         return (after + timedelta(days=1)).replace(hour=9, minute=0, second=0, microsecond=0)
 
     def _is_holiday(self, country_code: Optional[str], day) -> bool:
+        """Return True if *day* is a holiday for *country_code*.
+
+        Tolerates multiple holiday-date formats:
+          - ISO strings  "2026-01-01"
+          - date objects
+          - datetime objects
+          - integer YYYYMMDD (e.g. 20260101)
+          - list of dicts {"date": "2026-01-01", "name": "..."}
+        """
         if not country_code:
             return False
-        return day.isoformat() in self.holidays.get(country_code.upper(), [])
+        codes = self.holidays
+        # Handle both upper-case key and nested structure.
+        entries = codes.get(country_code.upper(), [])
+        if not isinstance(entries, list):
+            return False
+        iso = day.isoformat()  # "YYYY-MM-DD"
+        for entry in entries:
+            if isinstance(entry, dict):
+                # {"date": "2026-01-01", "name": "New Year"}
+                d = entry.get("date", "")
+                if isinstance(d, str) and d == iso:
+                    return True
+                try:
+                    if datetime.strptime(d, "%Y-%m-%d").date() == day:
+                        return True
+                except (ValueError, TypeError):
+                    pass
+            elif isinstance(entry, str):
+                if entry == iso:
+                    return True
+                # Try parsing alternative string formats.
+                for fmt in ("%Y%m%d", "%d/%m/%Y"):
+                    try:
+                        if datetime.strptime(entry, fmt).date() == day:
+                            return True
+                    except ValueError:
+                        pass
+            elif hasattr(entry, "isoformat"):
+                # date / datetime object
+                if entry.date().isoformat() == iso:
+                    return True
+        return False
 
     @staticmethod
     def to_db_string(dt: datetime) -> str:

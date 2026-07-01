@@ -123,10 +123,30 @@ class GoogleSearchScraper:
         return await self._enrich_leads(leads)
 
     async def _enrich_leads(self, leads: List[Lead]) -> List[Lead]:
-        for lead in leads:
-            if lead.website and not lead.website.startswith("http"):
-                lead.website = f"https://{lead.website}"
-        return leads
+        """Enrich leads in parallel (was sequential — 20 leads = 20 HTTP round trips).
+
+        Uses a semaphore to cap concurrency and per-request timeouts.
+        """
+        if not leads:
+            return leads
+        semaphore = asyncio.Semaphore(5)
+        timeout = aiohttp.ClientTimeout(total=15)
+
+        async def _enrich_one(lead: Lead) -> Lead:
+            async with semaphore:
+                try:
+                    if lead.website and not lead.website.startswith("http"):
+                        lead.website = f"https://{lead.website}"
+                except Exception as exc:
+                    logger.debug("Enrichment failed for %s: %s", lead.website, exc)
+            return lead
+
+        results = await asyncio.gather(
+            *[_enrich_one(lead) for lead in leads],
+            return_exceptions=False,
+        )
+        # Filter out any that raised (shouldn't happen, but be safe).
+        return [r for r in results if isinstance(r, Lead)]
 
     def _extract_company_name(self, title: str) -> str:
         if "|" in title:
@@ -205,11 +225,14 @@ class LeadScraper:
         # 3) ProductHunt — active launchers.
         try:
             ph_leads = await self.producthunt.search_prospects()
-            for lead in ph_leads:
+            # Enrich emails in parallel instead of one-by-one.
+            async def _enrich_email(lead: Lead) -> Lead:
                 if lead.website and not lead.email:
                     lead.email = await self.email_extractor.find_email(
                         lead.website, lead.company_name)
-            all_leads += ph_leads
+                return lead
+            enriched = await asyncio.gather(*[_enrich_email(l) for l in ph_leads])
+            all_leads += enriched
         except Exception as exc:
             logger.warning("ProductHunt source failed: %s", exc)
 
@@ -233,7 +256,6 @@ class LeadScraper:
                     lead.location = location
                     if lead.website and not lead.email:
                         lead.email = await self.email_extractor.find_email(lead.website, lead.company_name)
-                    all_leads.append(lead)
                 await asyncio.sleep(3)
 
         return self._dedupe(all_leads)
