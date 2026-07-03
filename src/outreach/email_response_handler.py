@@ -27,7 +27,7 @@ class EmailResponsePoller:
         self.imap_port = int(os.getenv("IMAP_PORT", "993"))
         self.calendly_link = os.getenv("CALENDLY_LINK", "")
         self.from_name = os.getenv("FROM_NAME", "Digital Marketing Expert")
-        self._processed_messages: set = set()
+        self._processed_messages: set = set()  # In-memory fallback
         self.compliance = ComplianceHandler(db)
 
     def can_poll(self) -> bool:
@@ -53,6 +53,13 @@ class EmailResponsePoller:
                 message_ids = await self._search_messages(M, lead_email)
                 for msg_id in message_ids:
                     msg_hash = hashlib.md5(f"{msg_id}:{lead_id}".encode()).hexdigest()
+                    
+                    # S3 fix: Check persistent dedup table first
+                    if await self.db.imap_dedup_seen(msg_hash):
+                        self._processed_messages.add(msg_hash)  # Cache in memory
+                        continue
+                    
+                    # Also check in-memory cache
                     if msg_hash in self._processed_messages:
                         continue
 
@@ -64,6 +71,9 @@ class EmailResponsePoller:
                     classification = await self._classify_reply(body)
                     await self.db.log_email_response(lead_id, subject, body, classification)
                     self._processed_messages.add(msg_hash)
+                    
+                    # S3 fix: Record in persistent dedup table
+                    await self.db.imap_dedup_record(msg_hash, lead_id)
 
                     if classification == "interested":
                         await self._send_calendly(lead_email, lead_id)

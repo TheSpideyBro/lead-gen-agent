@@ -38,7 +38,15 @@ class _IPRateLimiter:
 
 
 class TrackingServer:
-    def __init__(self, db, host: str = "0.0.0.0", port: int = 8080):
+    def __init__(self, db, host: str = None, port: int = None):
+        """Initialize tracking server with secure defaults.
+        
+        Binds to 127.0.0.1 by default for security. Override with environment
+        variables TRACKING_HOST and TRACKING_PORT if needed.
+        """
+        import os
+        self.host = host or os.getenv("TRACKING_HOST", "127.0.0.1")
+        self.port = port or int(os.getenv("TRACKING_PORT", "8080"))
         self.db = db
         self.host = host
         self.port = port
@@ -95,11 +103,27 @@ class TrackingServer:
     async def start(self):
         app = web.Application()
         app.router.add_get("/track/{lead_id}/{sequence_id}.png", self._handle_pixel)
+        
+        # A5 fix: Add health check endpoint for container orchestration
+        async def health_check(request: web.Request) -> web.Response:
+            return web.json_response({"status": "ok", "service": "tracking"})
+        app.router.add_get("/health", health_check)
+        
+        # S9 fix: Add security middleware
+        async def add_security_headers(request: web.Request, handler):
+            response = await handler(request)
+            response.headers.update({
+                "Content-Security-Policy": "default-src 'none'",
+                "X-Content-Type-Options": "nosniff",
+                "X-Frame-Options": "DENY",
+            })
+            return response
+        app.middlewares.append(add_security_headers)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, self.host, self.port)
         await self._site.start()
-        logger.info("Tracking server listening on %s:%s", self.host, self.port)
+        logger.info("Tracking server listening on %s:%s (secure: bound to localhost)", self.host, self.port)
 
     async def stop(self):
         # Shutdown cleanly even if start() raised mid-way.

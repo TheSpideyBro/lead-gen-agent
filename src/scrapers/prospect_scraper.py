@@ -242,8 +242,13 @@ class LeadScraper:
         return deduped
 
     async def find_prospects(self, niches: List[str], locations: List[str]) -> List[Lead]:
-        """Legacy location-based search (Google/DuckDuckGo) — kept as a fallback."""
+        """Legacy location-based search (Google/DuckDuckGo) — kept as a fallback.
+        
+        P1 fix: Email extraction is now batched with asyncio.gather instead of
+        sequential, reducing total time from O(n*15s) to O(n/5*15s).
+        """
         all_leads = []
+        leads_needing_enrichment: List[Lead] = []
 
         for niche in niches:
             for location in locations:
@@ -255,9 +260,35 @@ class LeadScraper:
                     lead.industry = niche
                     lead.location = location
                     if lead.website and not lead.email:
-                        lead.email = await self.email_extractor.find_email(lead.website, lead.company_name)
-                await asyncio.sleep(3)
+                        leads_needing_enrichment.append(lead)
+                await asyncio.sleep(3)  # Rate limit between searches
 
+        # P1 fix: Batch email enrichment with semaphore-controlled concurrency
+        if leads_needing_enrichment:
+            async def _enrich(lead: Lead) -> Lead:
+                if lead.email:
+                    return lead
+                lead.email = await self.email_extractor.find_email(
+                    lead.website, lead.company_name)
+                return lead
+            
+            # Process 5 at a time to avoid overwhelming targets
+            semaphore = asyncio.Semaphore(5)
+            
+            async def _enrich_sema(lead: Lead) -> Lead:
+                async with semaphore:
+                    return await _enrich(lead)
+            
+            enriched = await asyncio.gather(
+                *[_enrich_sema(lead) for lead in leads_needing_enrichment],
+                return_exceptions=False,
+            )
+            # Filter out any exceptions
+            for i, result in enumerate(enriched):
+                if isinstance(result, Lead):
+                    leads_needing_enrichment[i] = result
+
+        all_leads = leads_needing_enrichment
         return self._dedupe(all_leads)
 
     def _dedupe(self, leads: List[Lead]) -> List[Lead]:

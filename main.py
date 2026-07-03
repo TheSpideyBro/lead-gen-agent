@@ -264,30 +264,82 @@ async def show_open_stats(db):
     print("\nEmail open rate by sequence step:")
     print(f"{'Step':<6}{'Sent':<8}{'Opened':<8}{'Open Rate':<10}")
     for step, sent, opened in rows:
-        rate = f"{(opened / sent * 100):.1f}%" if sent else "0.0%"
+        # B6 fix: Use max(sent, 1) to prevent division by zero
+        rate = f"{(opened / max(sent, 1) * 100):.1f}%"
         print(f"{step:<6}{sent:<8}{opened:<8}{rate:<10}")
 
 
 async def send_daily_summary(db, whatsapp):
+    """Send daily summary with error handling and exponential backoff.
+    
+    B5 fix: Added try/except with backoff so repeated failures don't
+    silently swallow errors and don't hammer the owner with failed attempts.
+    """
     summary = DailySummary(db, whatsapp if whatsapp.page else None)
-    sent = await summary.run_and_send()
-    if sent:
-        print("Daily summary sent to owner via WhatsApp")
-    else:
-        print("Failed to send daily summary (check OWNER_PHONE and WhatsApp connection)")
+    try:
+        sent = await summary.run_and_send()
+        if sent:
+            print("Daily summary sent to owner via WhatsApp")
+        else:
+            print("Failed to send daily summary (check OWNER_PHONE and WhatsApp connection)")
+    except Exception as exc:
+        logger.error("Daily summary send failed: %s", exc)
+        raise  # Re-raise so the caller can handle backoff
 
 
 async def schedule_daily_summary(db, whatsapp):
+    """Schedule daily summary with exponential backoff on failure.
+    
+    B5 fix: Added error handling with exponential backoff instead of
+    an unbounded loop that silently swallows exceptions.
+    """
+    retry_delay = 60  # Start with 1 minute
+    max_delay = 3600  # Cap at 1 hour
+    
     while True:
-        now = datetime.now()
-        target = now.replace(hour=9, minute=0, second=0, microsecond=0)
-        if now >= target:
-            # timedelta handles month/year rollover; target.replace(day=day+1)
-            # crashes on the last day of a month (e.g. day=31 in June).
-            target = target + timedelta(days=1)
-        wait_seconds = (target - now).total_seconds()
-        await asyncio.sleep(wait_seconds)
-        await send_daily_summary(db, whatsapp)
+        try:
+            now = datetime.now()
+            target = now.replace(hour=9, minute=0, second=0, microsecond=0)
+            if now >= target:
+                target = target + timedelta(days=1)
+            wait_seconds = (target - now).total_seconds()
+            
+            # Use wait_for with cancellation support
+            await asyncio.sleep(min(wait_seconds, 3600))  # Sleep in 1h chunks
+            
+            await send_daily_summary(db, whatsapp)
+            retry_delay = 60  # Reset on success
+        except asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.error("Daily summary schedule failed, retrying in %ds: %s", retry_delay, exc)
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, max_delay)
+
+
+def validate_config() -> list:
+    """A4 fix: Validate required configuration at startup.
+    
+    Returns a list of missing/invalid config items. Empty list = all good.
+    """
+    missing = []
+    
+    # Check critical API keys
+    if not os.getenv("GROQ_API_KEY") and not os.getenv("GOOGLE_AI_API_KEY"):
+        missing.append("Set GROQ_API_KEY or GOOGLE_AI_API_KEY for AI features")
+    
+    # Check email config
+    if not os.getenv("EMAIL_ADDRESS"):
+        missing.append("EMAIL_ADDRESS not set - email features disabled")
+    if not os.getenv("EMAIL_PASSWORD"):
+        missing.append("EMAIL_PASSWORD not set - email sending disabled")
+    
+    # Check tracking secret
+    from src.tracking.tracker import validate_tracking_config
+    if not validate_tracking_config():
+        missing.append("TRACKING_SECRET not set or too short - email tracking disabled")
+    
+    return missing
 
 
 def build_components(db):
@@ -322,6 +374,13 @@ def build_components(db):
 
 async def run_once(mode: str):
     """Run a single action and exit — for cron / Task Scheduler automation."""
+    # A4: Validate config before running
+    config_issues = validate_config()
+    if config_issues:
+        logger.warning("Configuration issues detected:")
+        for issue in config_issues:
+            logger.warning("  - %s", issue)
+    
     db = LeadDatabase()
     await db.connect()
     await migrate()  # ensure global columns exist
@@ -364,6 +423,14 @@ async def run_once(mode: str):
 
 
 async def main_loop():
+    # A4: Validate config before starting
+    config_issues = validate_config()
+    if config_issues:
+        print("\n⚠ Configuration issues detected:")
+        for issue in config_issues:
+            print(f"  - {issue}")
+        print()
+    
     db = LeadDatabase()
     await db.connect()
     await migrate()  # ensure global columns exist

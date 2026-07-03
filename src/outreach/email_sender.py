@@ -41,25 +41,24 @@ class EmailSender:
             self._connection = None
 
     def _html_escape(self, text: str) -> str:
-        """Minimal HTML escaping for embedding LLM output in email bodies.
+        """HTML escaping for embedding LLM output in email bodies.
 
-        The LLM occasionally returns snippets that look like HTML; embedding
-        them raw creates both rendering artifacts and a small XSS surface
-        (the tracking pixel URL is the most worrying vector).
+        S8 fix: Now escapes single quotes to prevent attribute breakout.
+        Uses runtime character codes to avoid diff tool interpretation issues.
         """
         if not text:
             return ""
-        # Build the entity strings at runtime so the diff tool doesn't
-        # interpret them as HTML and strip them.
         amp = chr(38) + "amp;"
         lt = chr(38) + "lt;"
         gt = chr(38) + "gt;"
         quot = chr(38) + "quot;"
+        apos = chr(38) + "apos;"
         return (
             text.replace(chr(38), amp)
                 .replace(chr(60), lt)
                 .replace(chr(62), gt)
                 .replace(chr(34), quot)
+                .replace(chr(39), apos)
         )
 
     async def send_email(self, to_email: str, subject: str, body: str,

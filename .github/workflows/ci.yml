@@ -1,74 +1,28 @@
-name: CI
+# CI/CD Pipeline for Lead Gen Agent
+# Comprehensive security scanning, testing, and SBOM generation
+
+name: Security CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, master]
   pull_request:
-    branches: [main]
+    branches: [main, master]
+  schedule:
+    # Weekly security scan on Mondays at 9 AM UTC
+    - cron: '0 9 * * 1'
 
 jobs:
-  # ------------------------------------------------------------------
-  # Lint — compile check + pyflakes (stdlib only, no extra deps)
-  # ------------------------------------------------------------------
-  lint:
-    name: Lint
+  # ------------------------------------------------------------------ Lint & Type Check
+  quality:
+    name: Lint, Types & Security
     runs-on: ubuntu-latest
     strategy:
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
+
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install pyflakes
-        run: pip install pyflakes
-
-      - name: Collect Python files (skip __pycache__ and tests)
-        run: |
-          find . -name '*.py' -not -path '*/__pycache__/*' \
-            -not -path '*/.git/*' -not -path '*/venv/*' \
-            -not -path '*/.tox/*' | sort > all_py.txt
-          echo "Found $(wc -l < all_py.txt) Python files"
-
-      - name: Compile check (py_compile)
-        run: python -m py_compile --help > /dev/null && \
-             python -c "
-import py_compile, sys, pathlib
-failed = []
-for f in sorted(pathlib.Path('.').rglob('*.py')):
-    if '__pycache__' in str(f) or '.git' in str(f) or 'venv' in str(f):
-        continue
-    try:
-        py_compile.compile(str(f), doraise=True)
-    except py_compile.PyCompileError as e:
-        failed.append(str(e))
-if failed:
-    print('Compilation failures:')
-    for line in failed:
-        print(line)
-    sys.exit(1)
-print('All files compiled successfully.')
-"
-
-      - name: Pyflakes — undefined names
-        run: python -m pyflakes $(find . -name '*.py' -not -path '*/__pycache__/*' -not -path '*/.git/*' -not -path '*/venv/*')
-
-  # ------------------------------------------------------------------
-  # Test — run the full test suite
-  # ------------------------------------------------------------------
-  test:
-    name: Tests (Python ${{ matrix.python-version }})
-    runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-    steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Set up Python ${{ matrix.python-version }}
@@ -80,55 +34,114 @@ print('All files compiled successfully.')
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          pip install ruff mypy bandit safety
 
-      - name: Run tests
-        run: python -m pytest tests/ -v --tb=short
+      - name: Ruff lint
+        run: ruff check .
 
-      - name: Upload test results on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-results-python-${{ matrix.python-version }}
-          path: .pytest_cache/
+      - name: Ruff format check
+        run: ruff format --check .
 
-  # ------------------------------------------------------------------
-  # Security — check for accidentally committed secrets
-  # ------------------------------------------------------------------
-  security:
-    name: Secret scan
+      - name: MyPy type checking
+        run: mypy src/ agent.py main.py --ignore-missing-imports
+
+      - name: Bandit security scan
+        run: bandit -r src/ -ll
+
+      - name: Safety check (known vulnerabilities)
+        run: safety check -r requirements.txt
+
+      - name: Generate SBOM (Software Bill of Materials)
+        run: |
+          pip install cyclonedx-pip
+          cyclonedx-pip -r requirements.txt -o sbom.json
+          echo "SBOM generated at sbom.json"
+
+  # --------------------------------------------------------------- Dependency Scan
+  dep-scan:
+    name: Dependency Security Scan
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          fetch-depth: 0
+          python-version: "3.12"
 
-      - name: Check for hardcoded secrets
-        run: |
-          echo "Scanning for common secret patterns..."
-          # Patterns: API keys, passwords, tokens, private keys
-          grep -rniE '(api_key|password|secret|token|private_key)\s*[=:]\s*["\x27]?[A-Za-z0-9+/=]{16,}' \
-            --include='*.py' --include='*.json' --include='*.md' --include='*.sh' \
-            --exclude-dir=.git --exclude-dir=__pycache__ --exclude='.env.example' \
-            . || echo "No hardcoded secrets detected."
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-  # ------------------------------------------------------------------
-  # Summary
-  # ------------------------------------------------------------------
-  summary:
-    name: CI Summary
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'dependency-vulnerabilities'
+
+  # --------------------------------------------------------------- Unit Tests
+  test:
+    name: Tests (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
-    needs: [lint, test, security]
-    if: always()
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
+
     steps:
-      - name: Report status
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
         run: |
-          echo "## CI Pipeline Complete" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          for job in lint test security; do
-            if [ "${{ needs.$job.result }}" = "success" ]; then
-              echo "- ✅ $job" >> $GITHUB_STEP_SUMMARY
-            else
-              echo "- ❌ $job" >> $GITHUB_STEP_SUMMARY
-            fi
-          done
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pytest-cov pytest-asyncio
+
+      - name: Run tests with coverage
+        run: |
+          pytest tests/ -v --cov=src --cov-report=xml --cov-report=html
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          fail_ci_if_error: false
+
+  # -------------------------------------------------------------- Build Check
+  build:
+    name: Build & Compile Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Py_compile check all modules
+        run: |
+          find src -name "*.py" -not -path "*__pycache__*" | xargs python -m py_compile
+          python -m py_compile agent.py main.py

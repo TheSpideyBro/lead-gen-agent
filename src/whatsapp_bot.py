@@ -232,9 +232,9 @@ Respond with only the classification."""
                 # See review S5.
                 logger.error("WhatsApp classification failed: %s", type(exc).__name__)
         # Conservative fallback: do not auto-reply when AI is unavailable.
-        # The previous default was "question" which made the bot keep
-        # asking questions to "STOP" messages.  See code review B15.
-        return "question"
+        # Changed from "question" (which triggered AI auto-replies to STOP
+        # messages) to "neutral" (no action taken). See code review B4 fix.
+        return "neutral"
 
     async def _generate_answer(self, question: str, lead: dict) -> str:
         if self.ai:

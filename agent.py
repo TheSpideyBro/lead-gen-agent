@@ -70,6 +70,10 @@ STATE_PATH = Path("data/agent_state.json")
 LOG_PATH = Path("data/agent_log.jsonl")
 OWNER_PHONE = os.getenv("OWNER_PHONE", "")
 OWNER_TZ = os.getenv("OWNER_TIMEZONE", "UTC")
+# S2 fix: HMAC command authentication replaces weak PIN verification.
+# Commands must include HMAC signature: "COMMAND <timestamp> <hmac_signature>"
+OWNER_HMAC_SECRET = os.getenv("OWNER_HMAC_SECRET", "")
+OWNER_COMMAND_EXPIRY = int(os.getenv("OWNER_COMMAND_EXPIRY", "300"))  # 5 minutes
 
 # Loop cadence: how often the agent wakes to evaluate due tasks.
 TICK_SECONDS = 5
@@ -1578,13 +1582,66 @@ class AutonomousAgent:
         self.save_state()
 
     def verify_owner(self, phone: str, owner_norm: Optional[str] = None) -> bool:
+        """Verify the sender is the owner by phone number.
+        
+        S2 fix: Now requires exact E.164 match - no suffix fallback.
+        """
         owner_norm = owner_norm if owner_norm is not None else _normalize_phone(OWNER_PHONE)
         if not owner_norm:
             return False
-        return _normalize_phone(phone).endswith(owner_norm[-10:])
+        sender_norm = _normalize_phone(phone)
+        # Strict: only exact match allowed
+        return sender_norm == owner_norm
 
     async def parse_command(self, body: str) -> str:
-        cmd = (body or "").strip().upper()
+        """Parse and execute owner commands with HMAC verification.
+        
+        S2 fix: Implements HMAC command authentication.
+        Format: "COMMAND <unix_timestamp> <hmac_signature>"
+        The signature is HMAC-SHA256 of "COMMAND<timestamp>" using OWNER_HMAC_SECRET.
+        Commands older than OWNER_COMMAND_EXPIRY seconds are rejected.
+        """
+        body = (body or "").strip()
+        
+        # Parse command with HMAC verification
+        parts = body.split(None, 2)
+        if len(parts) < 3:
+            await self._reply_owner("⚠ Invalid command format. Use: COMMAND <timestamp> <hmac>")
+            return "INVALID_FORMAT"
+        
+        cmd_raw = parts[0].upper()
+        timestamp_str = parts[1]
+        hmac_signature = parts[2]
+        
+        # Verify timestamp freshness
+        try:
+            timestamp = float(timestamp_str)
+            age = time.time() - timestamp
+            if age > OWNER_COMMAND_EXPIRY:
+                await self._reply_owner(f"⚠ Command expired ({age:.0f}s old). Max: {OWNER_COMMAND_EXPIRY}s")
+                return "EXPIRED"
+        except ValueError:
+            await self._reply_owner("⚠ Invalid timestamp format")
+            return "INVALID_TIMESTAMP"
+        
+        # Verify HMAC signature
+        if OWNER_HMAC_SECRET:
+            import hashlib
+            import hmac as hmac_module
+            message = f"{cmd_raw}{timestamp_str}".encode()
+            expected_sig = hmac_module.new(
+                OWNER_HMAC_SECRET.encode(),
+                message,
+                hashlib.sha256
+            ).hexdigest()
+            
+            if not hmac_module.compare_digest(hmac_signature, expected_sig):
+                await self._reply_owner("⚠ Invalid HMAC signature. Command rejected.")
+                logger.warning(f"HMAC verification failed for command: {cmd_raw}")
+                return "AUTH_FAILED"
+        
+        cmd = cmd_raw
+        
         try:
             if cmd == "PAUSE":
                 await self.pause("owner")

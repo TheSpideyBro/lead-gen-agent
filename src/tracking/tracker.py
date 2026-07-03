@@ -13,6 +13,22 @@ def get_base_url() -> str:
     return os.getenv("TRACKING_BASE_URL", "http://localhost:8080").rstrip("/")
 
 
+def validate_tracking_config() -> bool:
+    """S7 fix: Validate TRACKING_SECRET is set before any email is sent.
+    
+    Returns True if config is valid, False otherwise.
+    Call this during startup (e.g., in build_components()) for early failure.
+    """
+    secret = os.getenv("TRACKING_SECRET")
+    if not secret:
+        logger.warning("TRACKING_SECRET is not set - email open tracking will be disabled")
+        return False
+    if len(secret) < 16:
+        logger.warning("TRACKING_SECRET is too short (< 16 chars) - use a strong random value")
+        return False
+    return True
+
+
 def _sign(lead_id: int, sequence_id: int) -> str:
     """HMAC-SHA256 signature over (lead_id, sequence_id, secret).
 

@@ -27,6 +27,8 @@ class LeadDatabase:
     async def connect(self):
         self.db = await aiosqlite.connect(str(DB_PATH))
         await self.db.execute("PRAGMA foreign_keys = ON")
+        # A2 fix: Enable WAL mode for better concurrent read performance
+        await self.db.execute("PRAGMA journal_mode = WAL")
         await self._create_tables()
 
     async def close(self):
@@ -133,6 +135,18 @@ class LeadDatabase:
             -- See code review B7.
             CREATE UNIQUE INDEX IF NOT EXISTS uniq_seq_lead_channel_step
                 ON sequences(lead_id, channel, step);
+        """)
+        await self.db.commit()
+
+        # S3 fix: Add table for persistent IMAP message dedup
+        await self.db.executescript("""
+            CREATE TABLE IF NOT EXISTS imap_dedup (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                msg_hash TEXT UNIQUE NOT NULL,
+                lead_id INTEGER,
+                processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_imap_hash ON imap_dedup(msg_hash);
         """)
         await self.db.commit()
 
@@ -314,9 +328,14 @@ class LeadDatabase:
         )
         await self.db.commit()
 
-    async def get_unreplied_responses(self):
+    async def get_unreplied_responses(self, limit: int = 200):
+        """Get unhandled email responses with a limit to prevent memory issues.
+        
+        B2 fix: Added limit parameter that was previously ignored.
+        """
         cursor = await self.db.execute(
-            "SELECT * FROM email_responses WHERE replied = 0"
+            "SELECT * FROM email_responses WHERE replied = 0 ORDER BY id DESC LIMIT ?",
+            (limit,),
         )
         return await cursor.fetchall()
 
@@ -401,6 +420,25 @@ class LeadDatabase:
             (email, phone),
         )
         return (await cursor.fetchone()) is not None
+
+    # S3: IMAP dedup methods
+    async def imap_dedup_seen(self, msg_hash: str) -> bool:
+        """Check if this IMAP message hash was already processed."""
+        cursor = await self.db.execute(
+            "SELECT 1 FROM imap_dedup WHERE msg_hash = ? LIMIT 1", (msg_hash,))
+        return (await cursor.fetchone()) is not None
+
+    async def imap_dedup_record(self, msg_hash: str, lead_id: int = None):
+        """Record that this IMAP message was processed."""
+        try:
+            await self.db.execute(
+                "INSERT INTO imap_dedup (msg_hash, lead_id) VALUES (?, ?)",
+                (msg_hash, lead_id),
+            )
+            await self.db.commit()
+        except Exception:
+            # Unique constraint violation = already recorded (idempotent)
+            pass
 
     # Columns added by src/db/migrate.py — allowed targets for enrichment writes.
     GLOBAL_COLUMNS = {"icp_score", "icp_tier", "detected_timezone",

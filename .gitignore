@@ -60,3 +60,6 @@ worktrees/
 
 # Local handoff doc (internal use only)
 handoff.md
+
+# Local bug/glitch log (internal use only)
+BUGLOG.md

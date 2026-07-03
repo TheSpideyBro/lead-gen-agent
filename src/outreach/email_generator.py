@@ -174,8 +174,13 @@ class OutreachSequence:
         for step, when in self.scheduler.schedule_steps(tz_name, channel, gaps, country_code):
             await self.db.schedule_message(lead_id, channel, step, when)
 
-    async def process_pending_emails(self, sender) -> int:
-        pending = await self.db.get_pending_emails()
+    async def process_pending_emails(self, limit: int = 100) -> int:
+        """Process pending email sequences.
+        
+        The `sender` parameter was removed - the method uses self.email_sender
+        (a singleton) instead. See code review B3 fix.
+        """
+        pending = await self.db.get_pending_emails(limit=limit)
         sent_count = 0
         for seq_id, lead_id, step, email, name, company in pending:
             # Section 6: never contact a globally-suppressed address.
