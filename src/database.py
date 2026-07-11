@@ -135,6 +135,15 @@ class LeadDatabase:
             -- See code review B7.
             CREATE UNIQUE INDEX IF NOT EXISTS uniq_seq_lead_channel_step
                 ON sequences(lead_id, channel, step);
+            -- 4.3 fix: indexes for frequent query patterns
+            CREATE INDEX IF NOT EXISTS idx_seq_pending
+                ON sequences(channel, sent, scheduled_for);
+            CREATE INDEX IF NOT EXISTS idx_resp_replied
+                ON email_responses(replied);
+            CREATE INDEX IF NOT EXISTS idx_wa_resp_received
+                ON whatsapp_responses(received_at);
+            CREATE INDEX IF NOT EXISTS idx_leads_phone_norm
+                ON leads(phone_normalized);
         """)
         await self.db.commit()
 

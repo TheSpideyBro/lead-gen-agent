@@ -12,6 +12,7 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 import time
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -30,9 +31,12 @@ class LogIntegrityChecker:
             secret_key: HMAC secret key for signing
         """
         self.log_path = Path(log_path)
-        self.secret_key = secret_key or hashlib.sha256(
-            str(time.time()).encode()
-        ).hexdigest()
+        self.secret_key = secret_key or os.getenv("LOG_INTEGRITY_SECRET", "")
+        if not self.secret_key:
+            # Generate a deterministic-but-not-time-based key for dev;
+            # in production LOG_INTEGRITY_SECRET must be set.
+            import secrets
+            self.secret_key = secrets.token_hex(16)  # 128-bit random, not time-based
         self._chain: List[str] = []  # Hash chain
     
     def sign_entry(self, entry: Dict) -> Dict:

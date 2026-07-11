@@ -42,6 +42,13 @@ class WhatsAppAPI:
         # Webhook auth: set via environment so only Meta-signed requests are accepted.
         self.webhook_verify_token = os.getenv("WHATSAPP_WEBHOOK_VERIFY_TOKEN", "")
         self.webhook_signing_secret = os.getenv("WHATSAPP_WEBHOOK_SIGNING_SECRET", "").encode("utf-8")
+        # S11 fix: enforce minimum entropy on verify token.
+        if self.webhook_verify_token and len(self.webhook_verify_token) < 16:
+            logger.error(
+                "WHATSAPP_WEBHOOK_VERIFY_TOKEN too short (%d chars, min 16). "
+                "Generate with: python -c 'import secrets; print(secrets.token_urlsafe(24))'",
+                len(self.webhook_verify_token),
+            )
         self.db = db
         self.ai = ai
         self.usage = APIUsageTracker()

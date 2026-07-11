@@ -30,7 +30,13 @@ class CSRFProtection:
             secret_key: Secret key for token signing
             token_expiry: Token expiry time in seconds (default: 1 hour)
         """
-        self.secret_key = secret_key or os.getenv("CSRF_SECRET", "default-change-me")
+        self.secret_key = secret_key or os.getenv("CSRF_SECRET", "")
+        if not self.secret_key:
+            raise RuntimeError(
+                "CSRF_SECRET is not set. "
+                "Set it via environment variable or pass secret_key= explicitly. "
+                "Generate with: python -c 'import secrets; print(secrets.token_hex(32))'"
+            )
         self.token_expiry = token_expiry
         self._used_tokens: Dict[str, float] = {}  # token -> timestamp
     
@@ -113,13 +119,32 @@ class CSRFProtection:
             del self._used_tokens[t]
 
 
-# Global singleton
-csrf_protection = CSRFProtection()
+# Global singleton — lazy-init so tests that import this module
+# without setting CSRF_SECRET don't crash at import time.
+_csrf_instance: Optional[CSRFProtection] = None
+
+
+def _get_csrf() -> CSRFProtection:
+    global _csrf_instance
+    if _csrf_instance is None:
+        _csrf_instance = CSRFProtection()
+    return _csrf_instance
+
+
+class _LazyCSRF:
+    """Proxy that forwards attribute access to the lazily-created singleton."""
+    def __getattr__(self, name):
+        return getattr(_get_csrf(), name)
+    def __repr__(self):
+        return repr(_get_csrf())
+
+
+csrf_protection = _LazyCSRF()
 
 
 def generate_csrf_token(user_id: str = None) -> str:
     """Convenience function to generate CSRF token."""
-    return csrf_protection.generate_token(user_id)
+    return _get_csrf().generate_token(user_id)
 
 
 def validate_csrf_token(token: str, user_id: str = None) -> bool:

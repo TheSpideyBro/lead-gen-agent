@@ -75,7 +75,7 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run Trivy vulnerability scanner
-        uses: aquasecurity/trivy-action@master
+        uses: aquasecurity/trivy-action@b2d39d1d0bb38b04cf7d7b67cf349ae3c7155a53 # v0.24.0
         with:
           scan-type: 'fs'
           scan-ref: '.'

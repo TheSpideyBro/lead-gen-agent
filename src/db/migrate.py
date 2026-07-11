@@ -58,6 +58,11 @@ async def migrate(db_path=None) -> list:
         await db.execute(GLOBAL_UNSUBSCRIBE_DDL)
         await db.execute("CREATE INDEX IF NOT EXISTS idx_unsub_email ON global_unsubscribe(email)")
         await db.execute("CREATE INDEX IF NOT EXISTS idx_unsub_phone ON global_unsubscribe(phone)")
+        # 4.3 fix: add indexes for frequent query patterns
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_seq_pending ON sequences(channel, sent, scheduled_for)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_resp_replied ON email_responses(replied)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_wa_resp_received ON whatsapp_responses(received_at)")
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_leads_phone_norm ON leads(phone_normalized)")
         await db.commit()
 
     if added:
