@@ -6,6 +6,7 @@ from src.outreach.email_sender import EmailSender
 from src.scheduling.timezone_scheduler import TimezoneScheduler
 from src.language.lang_handler import LangHandler
 from src.compliance.compliance_handler import ComplianceHandler
+from src.security.html_sanitizer import sanitize_html
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +78,9 @@ class MessageGenerator:
             - Clear CTA for a 15-min call"""
 
         body = await self.ai.generate(user_prompt, system_prompt)
-        
+        # S10 fix: sanitize LLM output before embedding in emails.
+        body = sanitize_html(body)
+
         if channel == "email":
             subject = f"Quick question about growing {lead.get('company_name', 'your business')}"
             full_body = f"{body}\n\n{self._signature()}"
@@ -107,7 +110,9 @@ class MessageGenerator:
         {extra3}"""
 
         body = await self.ai.generate(user_prompt, system_prompt)
-        
+        # S10 fix: sanitize LLM output before embedding in emails.
+        body = sanitize_html(body)
+
         if channel == "email":
             subject = f"Re: {lead.get('company_name', 'your business')} growth opportunity"
             return subject, f"{body}\n\n{self._signature()}"
@@ -304,6 +309,8 @@ class OutreachSequence:
         
         Sign off professionally."""
         body = await self.msg_gen.ai.generate(user_prompt, system_prompt)
+        # S10 fix: sanitize LLM output before embedding in emails.
+        body = sanitize_html(body)
         return f"{body}\n\n{self.msg_gen._signature()}"
 
     async def _generate_booking_whatsapp(self, lead: dict, calendly_link: str) -> str:
@@ -314,4 +321,5 @@ class OutreachSequence:
         {calendly_link}
         
         Be direct, friendly, under 100 words."""
-        return await self.msg_gen.ai.generate(user_prompt, system_prompt)
+        # S10 fix: sanitize LLM output for WhatsApp too.
+        return sanitize_html(await self.msg_gen.ai.generate(user_prompt, system_prompt))

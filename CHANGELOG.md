@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [v1.5.1] - 2026-07-12 — Sprint 1: Security & bug fixes
+
+### Fixed
+
+- **B4 — WhatsApp API classification fallback** (`src/whatsapp/whatsapp_api.py`)
+  When the AI client is unavailable or fails, `_classify()` now returns
+  `"neutral"` instead of `"question"`. This prevents the bot from
+  auto-replying to "STOP" / opt-out messages with AI-generated nonsense
+  when the AI service is down. The Playwright bot was already fixed in a
+  prior commit; this brings the Business API client in line.
+- **S4 — SQL injection risk via dynamic column names** (`src/database.py`)
+  `GLOBAL_COLUMNS` is now a `frozenset` (immutable) and `update_lead_global()`
+  sorts columns before building the parameterised SQL, making the allowlist
+  explicit and impossible to bypass at runtime.
+- **S6 — Proxy credential log leakage** (`src/utils/proxy_manager.py`)
+  The `_parse()` method now strips credentials from the log message for
+  malformed proxy entries, logging only `host:port` instead of the raw
+  `user:pass@host:port` string.
+- **S10 — LLM output unsanitized in emails** (`src/outreach/email_generator.py`)
+  All LLM-generated message bodies (initial, follow-up, booking email,
+  booking WhatsApp) are now passed through `sanitize_html()` before
+  embedding, stripping `<script>`, event handlers, and other dangerous
+  HTML while preserving safe tags like `<b>`, `<i>`, `<a>`.
+
+### Changed
+
+- `pyproject.toml` / `src/__init__.py`: version bumped 1.5.0 → 1.5.1.
+
+### Verification
+
+```bash
+python -m unittest discover tests -v
+# 30 pass, 3 pre-existing errors (mock issue unrelated to these changes)
+```
+
+---
+
 ## [v1.4.1] - 2026-06-14 — Post-merge cleanup + integration tests
 
 - Dropped **17 unused imports / local variables** flagged by `pyflakes` across

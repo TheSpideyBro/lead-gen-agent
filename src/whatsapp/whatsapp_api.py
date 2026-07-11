@@ -223,15 +223,15 @@ class WhatsAppAPI:
 
     async def _classify(self, message: str) -> str:
         if not self.ai:
-            return "question"
+            return "neutral"
         prompt = (f'Classify this WhatsApp message as exactly one word: '
                   f'interested, question, not_interested, stop.\n\nMessage: "{message}"')
         try:
             result = await self.ai.generate(prompt, "You are a message classifier.")
             word = result.strip().lower().split()[0]
-            return word if word in {"interested", "question", "not_interested", "stop"} else "question"
+            return word if word in {"interested", "question", "not_interested", "stop"} else "neutral"
         except Exception:
-            return "question"
+            return "neutral"
 
     async def _answer(self, question: str) -> str:
         if not self.ai:

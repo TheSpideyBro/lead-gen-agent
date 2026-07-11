@@ -441,23 +441,32 @@ class LeadDatabase:
             pass
 
     # Columns added by src/db/migrate.py — allowed targets for enrichment writes.
-    GLOBAL_COLUMNS = {"icp_score", "icp_tier", "detected_timezone",
-                      "detected_language", "email_verified", "region", "funding_stage"}
+    # S4 fix: strict allowlist prevents SQL injection via dynamic column names.
+    GLOBAL_COLUMNS: frozenset = frozenset({
+        "icp_score", "icp_tier", "detected_timezone",
+        "detected_language", "email_verified", "region", "funding_stage",
+    })
 
     async def update_lead_global(self, lead_id: int, **fields):
         """Update the global enrichment columns for a lead.
 
         Silently no-ops on a DB that hasn't been migrated yet (columns absent),
         so callers don't need to know the schema version.
+
+        S4 fix: only columns in GLOBAL_COLUMNS are accepted; any unexpected key
+        is silently dropped rather than interpolated into SQL.
         """
-        cols = {k: v for k, v in fields.items() if k in self.GLOBAL_COLUMNS and v is not None}
+        cols = {k: v for k, v in fields.items()
+                if k in self.GLOBAL_COLUMNS and v is not None}
         if not cols:
             return
-        assignments = ", ".join(f"{c} = ?" for c in cols)
+        # Build parameterised assignment fragments from the whitelist only.
+        assignments = ", ".join(f"{c} = ?" for c in sorted(cols))
+        values = [cols[c] for c in sorted(cols)]
         try:
             await self.db.execute(
                 f"UPDATE leads SET {assignments} WHERE id = ?",
-                (*cols.values(), lead_id))
+                (*values, lead_id))
             await self.db.commit()
         except Exception as exc:
             logger.warning("update_lead_global skipped (run migration?): %s", exc)

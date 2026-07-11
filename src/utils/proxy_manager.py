@@ -32,7 +32,9 @@ class ProxyManager:
                 ip, port = parts
                 out.append(f"http://{ip}:{port}")
             else:
-                logger.warning("Ignoring malformed proxy entry: %s", entry)
+                # S6 fix: log only the host:port, never the full entry with credentials.
+                safe = entry.split("@")[-1] if "@" in entry else entry
+                logger.warning("Ignoring malformed proxy entry: %s", safe)
         return out
 
     def has_proxies(self) -> bool:
